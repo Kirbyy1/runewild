@@ -43,6 +43,13 @@ pub enum Tile {
     Ice,
     CactusTop,
     CactusSide,
+
+    GroundGrassTuft,
+    GroundFlowersYellow,
+    GroundFlowersWhite,
+    GroundFlowersRed,
+    GroundFern,
+    GroundMushroom,
 }
 
 impl Tile {
@@ -80,6 +87,13 @@ impl Tile {
             Tile::Ice => (0, 4),
             Tile::CactusTop => (1, 4),
             Tile::CactusSide => (2, 4),
+
+            Tile::GroundGrassTuft => (0, 5),
+            Tile::GroundFlowersYellow => (1, 5),
+            Tile::GroundFlowersWhite => (2, 5),
+            Tile::GroundFlowersRed => (3, 5),
+            Tile::GroundFern => (4, 5),
+            Tile::GroundMushroom => (5, 5),
         }
     }
 }
@@ -143,6 +157,13 @@ pub fn get_texture_coords(block: BlockType, face: Option<FaceDirection>) -> (u32
             Some(FaceDirection::Top) | Some(FaceDirection::Bottom) => Tile::CactusTop,
             _ => Tile::CactusSide,
         },
+
+        BlockType::GrassTuft => Tile::GroundGrassTuft,
+        BlockType::FlowersYellow => Tile::GroundFlowersYellow,
+        BlockType::FlowersWhite => Tile::GroundFlowersWhite,
+        BlockType::FlowersRed => Tile::GroundFlowersRed,
+        BlockType::Fern => Tile::GroundFern,
+        BlockType::Mushroom => Tile::GroundMushroom,
     };
 
     tile.coords()

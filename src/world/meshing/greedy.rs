@@ -134,8 +134,13 @@ where
                         let mut npos = pos;
                         npos[axis] += dir;
                         let index = vu + vv * side_len;
-                        mask[index] = (block != BlockType::Air
-                            && should_emit_face(block, block_at(origin(npos))))
+                        // Plants emit once per cell (their crossed quads are
+                        // face-independent), pinned to the top-face pass.
+                        let plant_pass = block.is_plant() && axis == 1 && side == 1;
+                        mask[index] = (plant_pass
+                            || (block != BlockType::Air
+                                && !block.is_plant()
+                                && should_emit_face(block, block_at(origin(npos)))))
                         .then_some(FaceKey { block });
                     }
                 }
@@ -224,6 +229,12 @@ fn emit_rect<F, G>(
 
     let world_base = origin(base);
 
+    // Ground plants render as two crossed cutout quads instead of a cube.
+    if block.is_plant() {
+        emit_plant_cross(data, world_base, block);
+        return;
+    }
+
     let face_direction = match normal {
         [1.0, 0.0, 0.0] => Some(FaceDirection::East),
         [-1.0, 0.0, 0.0] => Some(FaceDirection::West),
@@ -235,8 +246,45 @@ fn emit_rect<F, G>(
 
     // The atlas already owns the material palette. A second saturated block
     // tint crushed shadows and made grass/foliage read as neon; vertex color
-    // now carries directional lighting only.
+    // now carries directional lighting only, plus a tiny deterministic
+    // per-block variation on natural materials so large surfaces of one
+    // block type stop reading as wallpaper. Leaves get an additional coarse
+    // cluster tint (3x3x3 cells) so canopies read as two-tone foliage
+    // masses instead of single-colour mega-cubes from outside.
+    let variation = match block {
+        BlockType::Grass
+        | BlockType::Dirt
+        | BlockType::Leaves
+        | BlockType::PineLeaves
+        | BlockType::JungleLeaves
+        | BlockType::AutumnLeaves
+        | BlockType::PalmLeaves => {
+            let h = (world_base.x as u32).wrapping_mul(0x9E37_79B1)
+                ^ (world_base.y as u32).wrapping_mul(0x85EB_CA77)
+                ^ (world_base.z as u32).wrapping_mul(0xC2B2_AE3D);
+            let fine = 0.965 + 0.07 * ((h >> 11) & 0x3FF) as f32 / 1024.0;
+            if block == BlockType::Grass || block == BlockType::Dirt {
+                fine
+            } else {
+                let cluster_h = (world_base.x as u32 / 3).wrapping_mul(0x2722_0A95)
+                    ^ (world_base.y as u32 / 3)
+                        .wrapping_mul(0x85EB_CA77)
+                        .rotate_left(7)
+                    ^ (world_base.z as u32 / 3)
+                        .wrapping_mul(0x9E37_79B1)
+                        .rotate_left(17);
+                let cluster = 0.90 + 0.16 * ((cluster_h >> 9) & 0x1FF) as f32 / 512.0;
+                fine * cluster
+            }
+        }
+        _ => 1.0,
+    };
     let color = Color::WHITE.to_srgba();
+    let (cr, cg, cb) = (
+        color.red * variation,
+        color.green * variation,
+        color.blue * variation,
+    );
     let (ac, ar) = get_texture_coords(block, face_direction);
     let tile_u = 1.0 / ATLAS_TILES_PER_ROW as f32;
     let tile_v = 1.0 / ATLAS_TILES_PER_COLUMN as f32;
@@ -280,6 +328,52 @@ fn emit_rect<F, G>(
         [max_u, max_v],
         [min_u, max_v],
     ];
+    // Per-vertex ambient occlusion (0fps smooth lighting): sample the three
+    // voxel neighbours that touch each corner inside the shell one layer in
+    // front of the face. Water stays untouched so basins keep a clean read.
+    let ao = if block.is_translucent() || extents[ua] != 1 || extents[va] != 1 {
+        [1.0; 4]
+    } else {
+        corner_ao(world_base, normal, ua, va, &face.vertices, block_at)
+    };
+    // Anisotropy fix: pick the triangle diagonal that connects the two
+    // darkest corners so interpolation stays symmetric across the quad.
+    let flip = ao[0] + ao[2] > ao[1] + ao[3];
+    // Depth gradient + foam on water tops; sides get a damped tint only so
+    // shoreline blocks stay translucent rather than slab-like. Sand touching
+    // water darkens into a wet band at the waterline.
+    let wet_sand = block == BlockType::Sand
+        && [
+            world_base.offset(0, 1, 0),
+            world_base.offset(0, -1, 0),
+            world_base.offset(1, 0, 0),
+            world_base.offset(-1, 0, 0),
+            world_base.offset(0, 0, 1),
+            world_base.offset(0, 0, -1),
+        ]
+        .iter()
+        .any(|n| block_at(*n) == BlockType::Water);
+    let (tr, tg, tb, ta) = if block == BlockType::Water && normal[1] > -0.5 {
+        water_face_tint(world_base, normal[1] > 0.5, block_at)
+    } else if wet_sand {
+        (0.74, 0.77, 0.84, 1.0)
+    } else {
+        (1.0, 1.0, 1.0, 1.0)
+    };
+    // Mountain materials zebra-stripe on terraced slopes: bright tops next
+    // to dark, AO-creased risers align into contour bands. Flatten the
+    // tread/riser luminance gap for vertical faces of the rocky palette.
+    let rocky_face = normal[1] == 0.0
+        && matches!(
+            block,
+            BlockType::Stone
+                | BlockType::Snow
+                | BlockType::Gravel
+                | BlockType::Sandstone
+                | BlockType::Terracotta
+                | BlockType::MossStone
+        );
+    let face_light = if rocky_face { light.max(0.94) } else { light };
     for (corner, vertex) in face.vertices.iter().enumerate() {
         // Position: scale the two tangent components by rect extents.
         let mut p = [
@@ -303,16 +397,153 @@ fn emit_rect<F, G>(
 
         positions.push([p[0], p[1], p[2]]);
         normals.push(normal);
+        let corner_ao = if rocky_face {
+            ao[corner].max(0.92)
+        } else {
+            ao[corner]
+        };
         colors.push([
-            color.red * light,
-            color.green * light,
-            color.blue * light,
-            color.alpha,
+            cr * face_light * corner_ao * tr,
+            cg * face_light * corner_ao * tg,
+            cb * face_light * corner_ao * tb,
+            color.alpha * ta,
         ]);
         uvs.push(uv_corners[corner]);
     }
-    indices.extend([start, start + 1, start + 2, start, start + 2, start + 3]);
+    indices.extend(if flip {
+        [start, start + 1, start + 3, start + 1, start + 2, start + 3]
+    } else {
+        [start, start + 1, start + 2, start, start + 2, start + 3]
+    });
     data.triangles += 2;
+}
+
+/// Brightness for the four occlusion levels reported by [`vertex_ao_level`].
+const AO_LEVELS: [f32; 4] = [0.60, 0.78, 0.90, 1.0];
+
+/// The four in-plane neighbours of a voxel.
+fn horizontal_neighbors(coord: VoxelCoord) -> [VoxelCoord; 4] {
+    [
+        coord.offset(1, 0, 0),
+        coord.offset(-1, 0, 0),
+        coord.offset(0, 0, 1),
+        coord.offset(0, 0, -1),
+    ]
+}
+
+/// Per-face water tint: shallows read bright and clear over the sandy
+/// floor, deep basins grade into dark rich blue, and top faces touching
+/// the shore get a slim foam rim. Alpha rises with depth so shallows stay
+/// see-through while deep water turns properly opaque. Vertex-colour only -
+/// no extra geometry or draw cost. Values stay close to 1.0: HDR-strength
+/// tints turned shoreline blocks into opaque pale slabs that read as ice.
+#[allow(clippy::type_complexity)]
+fn water_face_tint<F>(coord: VoxelCoord, is_top: bool, block_at: &mut F) -> (f32, f32, f32, f32)
+where
+    F: FnMut(VoxelCoord) -> BlockType,
+{
+    // Depth to the floor (capped): 0 = ankle-deep shelf, 12 = deep sea.
+    let mut depth = 0usize;
+    while depth < 12 && block_at(coord.offset(0, -(depth as i32 + 1), 0)) == BlockType::Water {
+        depth += 1;
+    }
+    let shallowness = 1.0 - depth as f32 / 12.0;
+
+    // Foam only on top faces: land rim on the shallow shelf (so rivers
+    // don't turn into white ribbons) plus spill edges. Side faces stay
+    // untinted by foam - foamed sides rendered as solid glowing slabs.
+    let mut foam_strength = 0.0f32;
+    if is_top {
+        let touches_land = horizontal_neighbors(coord)
+            .iter()
+            .any(|n| !matches!(block_at(*n), BlockType::Water | BlockType::Air));
+        let spill_edge = horizontal_neighbors(coord)
+            .iter()
+            .any(|n| block_at(*n) == BlockType::Air);
+        if touches_land && depth == 0 {
+            foam_strength = 0.40;
+        } else if touches_land && depth <= 1 {
+            foam_strength = 0.22;
+        } else if spill_edge {
+            foam_strength = 0.50;
+        }
+    }
+
+    let deep = (0.72, 0.85, 1.04);
+    let shallow = (1.26, 1.16, 1.02);
+    let t = shallowness * shallowness;
+    let mut r = deep.0 + (shallow.0 - deep.0) * t;
+    let mut g = deep.1 + (shallow.1 - deep.1) * t;
+    let mut b = deep.2 + (shallow.2 - deep.2) * t;
+    // Clear shallows, richer depths: the texture's own translucency scales
+    // with the vertex alpha, so shallow floors show through cleanly while
+    // deep water keeps its colour instead of washing out.
+    let mut alpha = 0.78 + (1.0 - shallowness) * 0.30;
+    // Side faces get half the gradient so shoreline water blocks don't
+    // render as bright plates against the sand.
+    if !is_top {
+        r = 1.0 + (r - 1.0) * 0.5;
+        g = 1.0 + (g - 1.0) * 0.5;
+        b = 1.0 + (b - 1.0) * 0.5;
+        alpha = 1.0 + (alpha - 1.0) * 0.5;
+    }
+    if foam_strength > 0.0 {
+        const FOAM: (f32, f32, f32) = (2.3, 2.35, 2.3);
+        r += (FOAM.0 - r) * foam_strength;
+        g += (FOAM.1 - g) * foam_strength;
+        b += (FOAM.2 - b) * foam_strength;
+        alpha = (alpha + 0.25).min(1.2);
+    }
+    (r, g, b, alpha)
+}
+
+/// Only fully opaque voxels darken their neighbourhood; water and air keep
+/// shorelines and cave mouths bright.
+fn occludes(block: BlockType) -> bool {
+    block.is_solid()
+}
+
+fn corner_ao<F>(
+    base: VoxelCoord,
+    normal: [f32; 3],
+    ua: usize,
+    va: usize,
+    vertices: &[[f32; 3]; 4],
+    block_at: &mut F,
+) -> [f32; 4]
+where
+    F: FnMut(VoxelCoord) -> BlockType,
+{
+    let front = base.offset(normal[0] as i32, normal[1] as i32, normal[2] as i32);
+    let (ux, uy, uz) = match ua {
+        0 => (1, 0, 0),
+        1 => (0, 1, 0),
+        _ => (0, 0, 1),
+    };
+    let (vx, vy, vz) = match va {
+        0 => (1, 0, 0),
+        1 => (0, 1, 0),
+        _ => (0, 0, 1),
+    };
+    let mut levels = [0.0f32; 4];
+    for (corner, vertex) in vertices.iter().enumerate() {
+        let du = if vertex[ua] < 0.5 { -1 } else { 1 };
+        let dv = if vertex[va] < 0.5 { -1 } else { 1 };
+        let side1 = u8::from(occludes(block_at(front.offset(du * ux, du * uy, du * uz))));
+        let side2 = u8::from(occludes(block_at(front.offset(dv * vx, dv * vy, dv * vz))));
+        let diagonal = u8::from(occludes(block_at(front.offset(
+            du * ux + dv * vx,
+            du * uy + dv * vy,
+            du * uz + dv * vz,
+        ))));
+        let level = if side1 == 1 && side2 == 1 {
+            0
+        } else {
+            3 - (side1 + side2 + diagonal)
+        };
+        levels[corner] = AO_LEVELS[level as usize];
+    }
+    levels
 }
 
 fn water_corner_height<F, G>(
@@ -377,6 +608,80 @@ fn world_base_axis(base: VoxelCoord, axis: usize) -> f32 {
     }
 }
 
+/// Emits the two crossed cutout quads for one ground-plant cell. Both quads
+/// use the up normal so plants light like the lawn they sit on; the foliage
+/// material is double-sided, so no extra reversed copies are needed.
+fn emit_plant_cross(data: &mut ChunkMeshData, base: VoxelCoord, block: BlockType) {
+    use crate::rendering::texture_atlas::{
+        get_texture_coords, ATLAS_TILES_PER_COLUMN, ATLAS_TILES_PER_ROW, ATLAS_TILE_RESOLUTION,
+    };
+
+    let (ac, ar) = get_texture_coords(block, Some(FaceDirection::Top));
+    let tile_u = 1.0 / ATLAS_TILES_PER_ROW as f32;
+    let tile_v = 1.0 / ATLAS_TILES_PER_COLUMN as f32;
+    let inset_u = 0.5 / (ATLAS_TILES_PER_ROW * ATLAS_TILE_RESOLUTION) as f32;
+    let inset_v = 0.5 / (ATLAS_TILES_PER_COLUMN * ATLAS_TILE_RESOLUTION) as f32;
+    let min_u = ac as f32 * tile_u + inset_u;
+    let min_v = ar as f32 * tile_v + inset_v;
+    let max_u = (ac + 1) as f32 * tile_u - inset_u;
+    let max_v = (ar + 1) as f32 * tile_v - inset_v;
+    let uv_corners = [
+        [min_u, min_v],
+        [max_u, min_v],
+        [max_u, max_v],
+        [min_u, max_v],
+    ];
+
+    // Full-cell height would turn tufts into green walls; each species gets
+    // its own natural silhouette height.
+    let height = match block {
+        BlockType::GrassTuft => 0.45,
+        BlockType::FlowersYellow | BlockType::FlowersWhite | BlockType::FlowersRed => 0.55,
+        BlockType::Fern => 0.70,
+        BlockType::Mushroom => 0.38,
+        _ => 0.5,
+    };
+
+    // Two diagonal quads across the cell, slightly inset so dense clumps
+    // keep readable gaps between neighbouring sprites.
+    let inset = 0.10;
+    let lo = inset;
+    let hi = 1.0 - inset;
+    let quads = [
+        [
+            [lo, 0.0, lo],
+            [hi, 0.0, hi],
+            [hi, height, hi],
+            [lo, height, lo],
+        ],
+        [
+            [hi, 0.0, lo],
+            [lo, 0.0, hi],
+            [lo, height, hi],
+            [hi, height, lo],
+        ],
+    ];
+    let normal = [0.0, 1.0, 0.0];
+    let light = 1.02;
+
+    for quad in quads {
+        let start = data.transparent_positions.len() as u32;
+        for (corner, vertex) in quad.iter().enumerate() {
+            data.transparent_positions.push([
+                base.x as f32 + vertex[0],
+                base.y as f32 + vertex[1],
+                base.z as f32 + vertex[2],
+            ]);
+            data.transparent_normals.push(normal);
+            data.transparent_colors.push([light, light, light, 1.0]);
+            data.transparent_uvs.push(uv_corners[corner]);
+        }
+        data.transparent_indices
+            .extend([start, start + 1, start + 2, start, start + 2, start + 3]);
+        data.triangles += 2;
+    }
+}
+
 fn should_emit_face(block: BlockType, neighbor: BlockType) -> bool {
     if neighbor == BlockType::Air {
         return true;
@@ -422,7 +727,7 @@ const FACES: [Face; 6] = [
             [1.0, 1.0, 0.0],
             [1.0, 1.0, 1.0],
         ],
-        light: 0.80,
+        light: 0.84,
     },
     Face {
         normal: [-1.0, 0.0, 0.0],
@@ -432,7 +737,7 @@ const FACES: [Face; 6] = [
             [0.0, 1.0, 1.0],
             [0.0, 1.0, 0.0],
         ],
-        light: 0.72,
+        light: 0.80,
     },
     Face {
         normal: [0.0, 1.0, 0.0],
@@ -442,7 +747,7 @@ const FACES: [Face; 6] = [
             [1.0, 1.0, 0.0],
             [0.0, 1.0, 0.0],
         ],
-        light: 1.08,
+        light: 1.00,
     },
     Face {
         normal: [0.0, -1.0, 0.0],
@@ -452,7 +757,7 @@ const FACES: [Face; 6] = [
             [1.0, 0.0, 1.0],
             [0.0, 0.0, 1.0],
         ],
-        light: 0.55,
+        light: 0.64,
     },
     Face {
         normal: [0.0, 0.0, 1.0],
@@ -462,7 +767,7 @@ const FACES: [Face; 6] = [
             [1.0, 1.0, 1.0],
             [0.0, 1.0, 1.0],
         ],
-        light: 0.88,
+        light: 0.90,
     },
     Face {
         normal: [0.0, 0.0, -1.0],
@@ -472,7 +777,7 @@ const FACES: [Face; 6] = [
             [0.0, 1.0, 0.0],
             [1.0, 1.0, 0.0],
         ],
-        light: 0.68,
+        light: 0.76,
     },
 ];
 
@@ -664,6 +969,37 @@ mod tests {
     }
 
     #[test]
+    fn corner_blocks_darken_adjacent_faces_without_breaking_winding() {
+        let mut chunk = Chunk::new(ChunkCoord { x: 0, z: 0 }, 0);
+        // Flat slab with one raised block: the top faces around it must pick
+        // up occlusion shading and every triangle keeps its outward winding.
+        for x in 0..3 {
+            for z in 0..3 {
+                chunk.set_local(LocalVoxelCoord { x, y: 1, z }, BlockType::Stone);
+            }
+        }
+        chunk.set_local(LocalVoxelCoord { x: 1, y: 2, z: 1 }, BlockType::Stone);
+
+        let data = build_chunk_mesh(&chunk, |coord| block_or_air(&chunk, coord));
+        let shaded = data
+            .colors
+            .iter()
+            .zip(&data.normals)
+            .filter(|(_, normal)| **normal == [0.0, 1.0, 0.0])
+            .map(|(color, _)| color[0])
+            .any(|red| red < 1.05);
+        assert!(shaded, "no ambient occlusion beside the raised block");
+
+        for triangle in data.indices.chunks_exact(3) {
+            let a = Vec3::from_array(data.positions[triangle[0] as usize]);
+            let b = Vec3::from_array(data.positions[triangle[1] as usize]);
+            let c = Vec3::from_array(data.positions[triangle[2] as usize]);
+            let normal = Vec3::from_array(data.normals[triangle[0] as usize]);
+            assert!((b - a).cross(c - a).dot(normal) > 0.0);
+        }
+    }
+
+    #[test]
     fn water_face_against_opaque_voxel_is_hidden() {
         let mut chunk = Chunk::new(ChunkCoord { x: 0, z: 0 }, 0);
         chunk.set_local(LocalVoxelCoord { x: 1, y: 1, z: 1 }, BlockType::Water);
@@ -766,5 +1102,44 @@ mod tests {
             .iter()
             .chain(&data.water_uvs)
             .all(|uv| uv[0] > 0.0 && uv[0] < 1.0 && uv[1] > 0.0 && uv[1] < 1.0));
+    }
+}
+
+#[cfg(test)]
+mod flower_debug {
+    use super::*;
+    use crate::world::{
+        chunk::Chunk,
+        coordinates::{ChunkCoord, LocalVoxelCoord},
+    };
+
+    #[test]
+    fn flower_quads_are_vertical() {
+        let mut chunk = Chunk::new(ChunkCoord { x: 0, z: 0 }, 0);
+        let local = LocalVoxelCoord { x: 4, y: 1, z: 4 };
+        chunk.set_local(local, BlockType::FlowersYellow);
+        for y in 0..3 {
+            for z in 0..8 {
+                for x in 0..8 {
+                    if (x, y, z) != (4, 1, 4) {
+                        chunk.set_local(LocalVoxelCoord { x, y, z }, BlockType::Air);
+                    }
+                }
+            }
+        }
+        let data = build_chunk_mesh(&chunk, |coord| {
+            chunk.get_world(coord).unwrap_or(BlockType::Air)
+        });
+        let ys: Vec<f32> = data.transparent_positions.iter().map(|p| p[1]).collect();
+        println!(
+            "transparent verts: {}",
+            data.transparent_positions.len() / 4
+        );
+        println!(
+            "y range: {:?}..{:?}",
+            ys.iter().cloned().fold(f32::MAX, f32::min),
+            ys.iter().cloned().fold(f32::MIN, f32::max)
+        );
+        println!("positions: {:?}", data.transparent_positions);
     }
 }

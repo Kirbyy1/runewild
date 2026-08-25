@@ -5,6 +5,7 @@ use crate::{
     rendering::RenderingPlugin,
     settings::WorldSettings,
     ui::UiPlugin,
+    visual_test::VisualTestPlugin,
     world::{persistence::SaveGame, WorldPlugin},
 };
 
@@ -20,15 +21,21 @@ pub enum GameState {
     Settings,
 }
 
-pub fn run() {
-    App::new()
-        .insert_resource(ClearColor(Color::srgb(0.42, 0.67, 0.88)))
+pub fn run(visual_test: bool) {
+    let mut app = App::new();
+    app.insert_resource(ClearColor(Color::srgb(0.46, 0.72, 0.92)))
         .insert_resource(Msaa::Sample4)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Runewild".to_string(),
                 resolution: (1280.0_f32, 720.0_f32).into(),
-                present_mode: bevy::window::PresentMode::AutoVsync,
+                // The screenshot harness measures real frame cost, so it
+                // must not be throttled to the display refresh rate.
+                present_mode: if visual_test {
+                    bevy::window::PresentMode::AutoNoVsync
+                } else {
+                    bevy::window::PresentMode::AutoVsync
+                },
                 ..default()
             }),
             ..default()
@@ -36,6 +43,9 @@ pub fn run() {
         .insert_resource(SaveGame::load_or_default(WORLD_SEED))
         .insert_resource(WorldSettings::load_or_default())
         .init_state::<GameState>()
-        .add_plugins((RenderingPlugin, WorldPlugin, PlayerPlugin, UiPlugin))
-        .run();
+        .add_plugins((RenderingPlugin, WorldPlugin, PlayerPlugin, UiPlugin));
+    if visual_test {
+        app.add_plugins(VisualTestPlugin);
+    }
+    app.run();
 }

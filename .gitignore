@@ -7,3 +7,10 @@
 /.junie/
 /.runtime-visual-audit/
 /debug/
+/.opencode/
+/AI_PROGRESS.md
+/session-ses_*.md
+visual_tests/session_save.json
+visual_tests/session_settings.json
+visual_tests/run.log
+visual_tests/perf.txt

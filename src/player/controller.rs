@@ -17,7 +17,7 @@ use crate::{
 
 const PLAYER_HEIGHT: f32 = 1.82;
 const PLAYER_RADIUS: f32 = 0.32;
-const EYE_HEIGHT: f32 = 1.62;
+pub const EYE_HEIGHT: f32 = 1.62;
 const WALK_SPEED: f32 = 5.2;
 const SPRINT_SPEED: f32 = 8.4;
 const JUMP_SPEED: f32 = 7.2;
@@ -96,12 +96,12 @@ pub fn setup_player(mut commands: Commands, save: Res<SaveGame>, settings: Res<W
                     ..default()
                 },
                 FogSettings {
-                    color: Color::srgba(0.48, 0.69, 0.86, 0.72),
-                    directional_light_color: Color::srgba(1.0, 0.84, 0.62, 0.42),
-                    directional_light_exponent: 24.0,
+                    color: Color::srgb(0.50, 0.73, 0.92),
+                    directional_light_color: Color::srgba(1.0, 0.88, 0.66, 0.22),
+                    directional_light_exponent: 20.0,
                     falloff: FogFalloff::Linear {
-                        start: render_distance_m * 0.70,
-                        end: render_distance_m * 0.98,
+                        start: render_distance_m * 0.85,
+                        end: render_distance_m * 1.00,
                     },
                 },
             ));
@@ -123,8 +123,8 @@ pub fn apply_render_settings(
         perspective.far = distance * 1.2;
     }
     fog.falloff = FogFalloff::Linear {
-        start: distance * 0.70,
-        end: distance * 0.98,
+        start: distance * 0.85,
+        end: distance * 1.00,
     };
 }
 

@@ -35,6 +35,7 @@ pub struct ColumnClimate {
 }
 
 pub struct WorldNoise {
+    seed: u64,
     continental: OpenSimplex,
     elevation: OpenSimplex,
     mountains: OpenSimplex,
@@ -62,12 +63,22 @@ pub struct WorldNoise {
     geology: OpenSimplex,
     landmark: OpenSimplex,
     escarpment: OpenSimplex,
+    seabed_broad: OpenSimplex,
+    seabed_medium: OpenSimplex,
+    chain_axis: OpenSimplex,
+    chain_meander: OpenSimplex,
+    chain_crest: OpenSimplex,
+    chain_crest2: OpenSimplex,
+    chain_crest3: OpenSimplex,
+    chain_band: OpenSimplex,
+    chain_hills: OpenSimplex,
 }
 
 impl WorldNoise {
     pub fn new(seed: u64) -> Self {
         let s = seed as u32;
         Self {
+            seed,
             continental: OpenSimplex::new(s),
             elevation: OpenSimplex::new(s.wrapping_add(11)),
             mountains: OpenSimplex::new(s.wrapping_add(29)),
@@ -95,7 +106,167 @@ impl WorldNoise {
             geology: OpenSimplex::new(s.wrapping_add(419)),
             landmark: OpenSimplex::new(s.wrapping_add(433)),
             escarpment: OpenSimplex::new(s.wrapping_add(449)),
+            seabed_broad: OpenSimplex::new(s.wrapping_add(467)),
+            seabed_medium: OpenSimplex::new(s.wrapping_add(487)),
+            chain_axis: OpenSimplex::new(s.wrapping_add(503)),
+            chain_meander: OpenSimplex::new(s.wrapping_add(521)),
+            chain_crest: OpenSimplex::new(s.wrapping_add(547)),
+            chain_crest2: OpenSimplex::new(s.wrapping_add(569)),
+            chain_crest3: OpenSimplex::new(s.wrapping_add(631)),
+            chain_band: OpenSimplex::new(s.wrapping_add(587)),
+            chain_hills: OpenSimplex::new(s.wrapping_add(607)),
         }
+    }
+
+    /// Deterministic hash for cellular-noise feature points (splitmix-style).
+    fn massif_hash(&self, cell_x: i64, cell_z: i64) -> u64 {
+        let mut h = (cell_x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (cell_z as u64)
+                .rotate_left(32)
+                .wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+            ^ self.seed.wrapping_mul(0x1000_0000_0193);
+        h ^= h >> 30;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 27;
+        h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+        h ^ (h >> 31)
+    }
+
+    /// Cellular F1 distance in cell units for the massif domes, plus a
+    /// stable per-massif random value in [0, 1), so every dome in a range
+    /// carries its own height character (sky-piercing summits next to
+    /// modest shoulders) instead of all massifs sharing one silhouette.
+    /// Hand-rolled because the `noise` crate's `Worley` holds an `Rc` and
+    /// is neither `Send` nor `Sync`, which `WorldNoise` (used from parallel
+    /// systems) requires. Same 550 m cell scale and F1 semantics as before.
+    fn massif_cell(&self, x: f64, z: f64) -> (f64, f64) {
+        const CELL: f64 = 550.0;
+        let cell_x = (x / CELL).floor() as i64;
+        let cell_z = (z / CELL).floor() as i64;
+        let mut best = f64::INFINITY;
+        let mut best_hash = 0u64;
+        for dz in -1..=1i64 {
+            for dx in -1..=1i64 {
+                let (nx, nz) = (cell_x + dx, cell_z + dz);
+                let h = self.massif_hash(nx, nz);
+                let px = (nx as f64 + (h & 0xFFFF) as f64 / 65536.0) * CELL;
+                let pz = (nz as f64 + ((h >> 16) & 0xFFFF) as f64 / 65536.0) * CELL;
+                let dist = ((px - x) * (px - x) + (pz - z) * (pz - z)).sqrt();
+                if dist < best {
+                    best = dist;
+                    best_hash = h;
+                }
+            }
+        }
+        ((best / CELL), (best_hash >> 32) as f64 / u32::MAX as f64)
+    }
+
+    /// Anisotropic mountain-range structure. One orientation per ~2000 m
+    /// province, a meandered ~1 km corridor, a three-octave ridged crest
+    /// sharpened to a blade along the spine, Worley massif domes whose
+    /// individual heights vary dome-to-dome with deep saddle passes between
+    /// them, a foothill apron and a flanking moat valley. Deterministic in
+    /// world coordinates only.
+    pub fn mountain_chain(
+        &self,
+        x: i32,
+        z: i32,
+        continentalness: f64,
+        erosion: f64,
+    ) -> MountainChain {
+        // Ranges rise across most coherent inland provinces; only strongly
+        // eroded flatlands suppress them entirely.
+        let province = smoothstep_range(-0.12, 0.28, continentalness)
+            * (1.0 - smoothstep_range(0.18, 0.72, erosion));
+        if province <= 0.0 {
+            return MountainChain {
+                mask: 0.0,
+                height: 0.0,
+            };
+        }
+
+        let xf = x as f64;
+        let zf = z as f64;
+        let axis = self.chain_axis.get([xf / 2000.0, zf / 2000.0]) * std::f64::consts::FRAC_PI_2;
+        let (cos_a, sin_a) = (axis.cos(), axis.sin());
+        let u = xf * cos_a + zf * sin_a;
+        let v = -xf * sin_a + zf * cos_a;
+        let meander = self.chain_meander.get([u / 420.0, v / 420.0]) * 200.0;
+        let v = v + meander;
+
+        let across = v / 520.0;
+        let corridor = (-across * across).exp();
+
+        // Ridged crest along the spine: three octaves from the range-scale
+        // ridgeline down to crag, sharpened so ridgelines stay narrow while
+        // flanks fall away smoothly.
+        let c1 = 1.0 - self.chain_crest.get([xf / 420.0, zf / 420.0]).abs();
+        let c2 = 1.0
+            - self
+                .chain_crest2
+                .get([xf / 170.0 + 31.7, zf / 170.0 + 11.3])
+                .abs();
+        let c3 = 1.0
+            - self
+                .chain_crest3
+                .get([xf / 70.0 + 7.7, zf / 70.0 + 91.3])
+                .abs();
+        let crest = (c1 * 0.50 + c2 * 0.30 + c3 * 0.20)
+            .clamp(0.0, 1.0)
+            .powf(2.4);
+
+        // Massif domes along the corridor (cellular F1 falloff). Each dome
+        // rolls its own height budget so a range reads as a train of distinct
+        // peaks and shoulders; saddle passes open where a slow field crosses
+        // zero.
+        let (f1, massif_roll) = self.massif_cell(xf, zf);
+        let massif = smoothstep_range(0.85, 0.25, f1);
+        let peak_amp = 0.55 + 0.65 * massif_roll;
+        let pass = 1.0
+            - smoothstep_range(
+                0.0,
+                0.30,
+                self.chain_hills.get([xf / 550.0, zf / 550.0]).abs(),
+            );
+
+        // Some sections of a range are higher than others.
+        let band = self.chain_band.get([u / 900.0, v / 900.0]);
+        let ridge_top = 90.0 + 40.0 * band;
+        let tiers = 1.0
+            + 0.35 * smoothstep_range(0.45, 0.72, crest * massif)
+            + 0.25 * smoothstep_range(0.72, 0.90, crest * massif);
+        let spine = massif * peak_amp * tiers * crest.powf(0.8) * ridge_top * (0.35 + 0.65 * pass);
+
+        // Broad foot bulge inside the corridor, a rolling foothill apron
+        // outside it, and a shallow moat valley beyond the apron.
+        let base_bulge = 32.0 * corridor;
+        let apron_dist = (v.abs() - 600.0) / 340.0;
+        let apron = (-apron_dist * apron_dist).exp()
+            * 22.0
+            * (0.5 + 0.5 * (self.chain_hills.get([xf / 170.0, zf / 170.0]) * 0.5 + 0.5));
+        let moat = smoothstep_range(0.95, 1.7, v.abs() / 450.0) * 16.0;
+
+        let height = province * (corridor * spine + base_bulge + apron - moat);
+        let mask = (province * corridor * massif).clamp(0.0, 1.0);
+        MountainChain { mask, height }
+    }
+
+    /// Continentalness field shared by `climate_at` and the cheap
+    /// `mountain_mask_hint`, so the two can never drift apart.
+    fn continentalness_at(&self, warped_x: f64, warped_z: f64) -> f64 {
+        let (coast_x, coast_z) = (
+            warped_x + self.warp_x.get([warped_x / 90.0 + 3.7, warped_z / 90.0]) * 25.0,
+            warped_z + self.warp_z.get([warped_x / 90.0, warped_z / 90.0 + 9.2]) * 25.0,
+        );
+        let c_macro = self.continental.get([coast_x / 3200.0, coast_z / 3200.0]);
+        let c_medium = self
+            .continental
+            .get([coast_x / 1300.0 + 52.3, coast_z / 1300.0 + 81.7])
+            * 0.25;
+        // Small landward bias: with kilometre-scale continents any given
+        // window is otherwise likelier to sit in open water, which starves
+        // the spawn region of usable land.
+        ((c_macro * 0.8 + c_medium) + 0.06).clamp(-1.0, 1.0)
     }
 
     /// Shared macro domain warp in metres. Landforms, climate and geology all
@@ -120,13 +291,12 @@ impl WorldNoise {
         // Macro-scale domain warp (creates winding coastlines and natural biome curves)
         let (warped_x, warped_z) = self.terrain_warp_at(xf, zf);
 
-        // Continentalness: large scale landmass distribution (continents, oceans, shelves)
-        let c_macro = self.continental.get([warped_x / 580.0, warped_z / 580.0]);
-        let c_medium = self
-            .continental
-            .get([warped_x / 240.0 + 52.3, warped_z / 240.0 + 81.7])
-            * 0.25;
-        let continentalness = (c_macro * 0.8 + c_medium).clamp(-1.0, 1.0);
+        // Continentalness: large scale landmass distribution (continents,
+        // oceans, shelves). The primary octave sets the continent scale
+        // (multi-kilometre landmasses); the medium octave adds inland seas
+        // and bays. A dedicated coast warp keeps shorelines winding at the
+        // kilometre scale without disturbing landform/geology alignment.
+        let continentalness = self.continentalness_at(warped_x, warped_z);
 
         // Temperature: smooth thermal bands with local variation and continent influence
         let temp_base = self.temperature.get([warped_x / 460.0, warped_z / 460.0]);
@@ -316,6 +486,64 @@ impl WorldNoise {
         smoothstep01(n * 0.5 + 0.5)
     }
 
+    /// Coherent meadow-plant clump mask (0..1). Ground vegetation concentrates
+    /// where this field is high instead of sprinkling uniformly.
+    pub fn meadow_patch_field(&self, x: i32, z: i32) -> f64 {
+        let xf = x as f64;
+        let zf = z as f64;
+        let n = self.bush_patch.get([xf / 52.0 + 71.3, zf / 52.0 + 13.9]);
+        let detail = self.bush_patch.get([xf / 17.0 + 5.1, zf / 17.0 + 91.7]) * 0.30;
+        smoothstep01((n * 0.85 + detail) * 0.5 + 0.5)
+    }
+
+    /// Ridged spur/gully field for mountain flanks. ~[0, 1] ridges with
+    /// secondary variation; the mid frequency exists to break
+    /// contour-parallel stair lines into merging/splitting risers. Kept at
+    /// wavelengths the 4 m regional grid can represent without aliasing.
+    pub fn mountain_spur_field(&self, x: f64, z: f64) -> f64 {
+        let ridges = 1.0 - (self.ridges.get([x / 46.0, z / 46.0]).abs() * 1.7).min(1.0);
+        let mid = self.mountains.get([x / 13.0, z / 13.0]) * 0.42;
+        ridges + mid
+    }
+
+    /// Smooth medium-scale jitter (~12 m wavelength) for mountain voxel
+    /// steps: shifts whole ledge sections so stair lines stay irregular.
+    pub fn mountain_ledge_jitter(&self, x: i32, z: i32) -> f64 {
+        self.mountains
+            .get([x as f64 / 12.0 + 3.7, z as f64 / 12.0 + 91.2])
+            * 1.6
+    }
+
+    /// Broad swells for the deep ocean floor in [-1, 1]: a ~110 m landform
+    /// wave plus a ~34 m secondary, so abyssal seabeds read as drowned
+    /// terrain with basins and ridges instead of a poured bowl.
+    pub fn seabed_relief(&self, x: i32, z: i32) -> f64 {
+        let xf = x as f64;
+        let zf = z as f64;
+        let broad = self.seabed_broad.get([xf / 110.0, zf / 110.0]);
+        let medium = self.seabed_medium.get([xf / 34.0 + 41.7, zf / 34.0 + 13.9]) * 0.38;
+        (broad + medium).clamp(-1.0, 1.0)
+    }
+
+    /// Clustered rock-exposure patches inside the snow zone (0..1). Used
+    /// instead of per-column hash so exposed stone forms blobs, not speckle.
+    pub fn snow_rock_patch(&self, x: i32, z: i32) -> f64 {
+        let xf = x as f64;
+        let zf = z as f64;
+        let n = self.rocky_patch.get([xf / 9.0 + 41.3, zf / 9.0 + 7.7]);
+        smoothstep01(n * 0.5 + 0.5)
+    }
+
+    /// Standalone mountain-mask estimate matching the mask used by the
+    /// height pipeline (`mountain_chain`), for callers that only need the
+    /// mask and cannot afford a full climate sample.
+    pub fn mountain_mask_hint(&self, x: i32, z: i32) -> f64 {
+        let (warped_x, warped_z) = self.terrain_warp_at(x as f64, z as f64);
+        let continentalness = self.continentalness_at(warped_x, warped_z);
+        let erosion = self.erosion.get([warped_x / 260.0, warped_z / 260.0]);
+        self.mountain_chain(x, z, continentalness, erosion).mask
+    }
+
     /// Rocky coastline variation.
     pub fn coast_rock(&self, x: i32, z: i32) -> f64 {
         let xf = x as f64;
@@ -325,9 +553,22 @@ impl WorldNoise {
     }
 }
 
+/// Anisotropic mountain-range sample: `mask` drives biome/decor/snow gates,
+/// `height` is the metre contribution to the landform stack.
+#[derive(Debug, Clone, Copy)]
+pub struct MountainChain {
+    pub mask: f64,
+    pub height: f64,
+}
+
 /// Cheap clamp+shape used by the fields above.
 fn smoothstep01(v: f64) -> f64 {
     let t = v.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn smoothstep_range(edge0: f64, edge1: f64, value: f64) -> f64 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 

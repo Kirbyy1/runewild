@@ -152,7 +152,7 @@ pub fn block_interaction(
         && world.set_block(hit.voxel, BlockType::Air, &mut save)
     {
         water.remove_source(hit.voxel);
-        water.notify_block_changed(hit.voxel);
+        water.notify_block_changed(&mut world, hit.voxel);
     }
 
     if mouse.just_pressed(MouseButton::Right) {
@@ -169,7 +169,7 @@ pub fn block_interaction(
                 water.add_source(placement);
             } else {
                 water.remove_source(placement);
-                water.notify_block_changed(placement);
+                water.notify_block_changed(&mut world, placement);
             }
         }
     }

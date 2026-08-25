@@ -116,6 +116,24 @@ impl ChunkManager {
             .and_then(|chunk| chunk.water_shape_local(coord.section_local()))
     }
 
+    /// True when every stored section of `column` has a current mesh. Used
+    /// by the visual test harness to wait for stable frames.
+    pub fn column_meshes_ready(&self, column: ChunkCoord) -> bool {
+        if !self.columns.contains(&column) {
+            return false;
+        }
+        let mut sections = 0usize;
+        for chunk in self.chunks.values() {
+            if chunk.coord == column {
+                if chunk.dirty {
+                    return false;
+                }
+                sections += 1;
+            }
+        }
+        sections > 0
+    }
+
     /// Generates every content-bearing section of one column.
     ///
     /// All loops operate on terrain voxels; generator heights are metres,
@@ -226,17 +244,22 @@ impl ChunkManager {
             }
             let chunk = &mut fresh[base_index(sy)];
             let existing = chunk.get_local(v.coord.section_local());
-            let replaceable = matches!(
-                existing,
-                BlockType::Air
-                    | BlockType::Leaves
-                    | BlockType::PineLeaves
-                    | BlockType::JungleLeaves
-                    | BlockType::AutumnLeaves
-                    | BlockType::PalmLeaves
-                    | BlockType::Snow
-                    | BlockType::Water
-            );
+            // Ground plants only ever claim open air.
+            let replaceable = if v.block.is_plant() {
+                matches!(existing, BlockType::Air)
+            } else {
+                matches!(
+                    existing,
+                    BlockType::Air
+                        | BlockType::Leaves
+                        | BlockType::PineLeaves
+                        | BlockType::JungleLeaves
+                        | BlockType::AutumnLeaves
+                        | BlockType::PalmLeaves
+                        | BlockType::Snow
+                        | BlockType::Water
+                )
+            };
             if replaceable {
                 chunk.set_local(v.coord.section_local(), v.block);
             }
@@ -341,9 +364,14 @@ impl ChunkManager {
         coord: VoxelCoord,
         shape: WaterShape,
     ) -> bool {
-        self.chunks
+        let changed = self
+            .chunks
             .get_mut(&coord.section())
-            .is_some_and(|chunk| chunk.set_water_shape_local(coord.section_local(), shape))
+            .is_some_and(|chunk| chunk.set_water_shape_local(coord.section_local(), shape));
+        if changed {
+            self.mark_voxel_and_neighbors_dirty(coord);
+        }
+        changed
     }
 
     fn take_pending_water_sources(&mut self) -> Vec<VoxelCoord> {
@@ -634,7 +662,20 @@ fn column_ready_for_meshing(
     column: ChunkCoord,
     load_radius: i32,
 ) -> bool {
-    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+    // Every surrounding column that will be loaded must exist first. Ambient
+    // occlusion samples voxel diagonals, so a corner face meshed against the
+    // procedural fallback would go stale: column generation only re-dirties
+    // the six face-adjacent sections, never the diagonal neighbours.
+    for (dx, dz) in [
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+    ] {
         let neighbor = ChunkCoord {
             x: column.x + dx,
             z: column.z + dz,
@@ -733,6 +774,28 @@ mod tests {
 
         assert_eq!(manager.block_at(source.offset(1, 0, 0)), BlockType::Air);
         assert_eq!(manager.block_at(source.offset(4, 0, 0)), BlockType::Air);
+    }
+
+    #[test]
+    fn procedural_basin_water_refills_player_dug_holes() {
+        let mut manager = water_test_world();
+        // A static procedural lake cell: present in the world but carrying
+        // no simulation state of its own.
+        let lake = VoxelCoord::new(10, 1, 10);
+        assert!(manager.set_simulated_block(lake, BlockType::Water));
+        // The player breaks the bank: an air pocket now borders the basin.
+        let hole = lake.offset(1, 0, 0);
+        assert_eq!(manager.block_at(hole), BlockType::Air);
+
+        let mut water = WaterSimulation::default();
+        water.notify_block_changed(&mut manager, hole);
+        water.step_cells(&mut manager, 20_000);
+
+        assert_eq!(
+            manager.block_at(hole),
+            BlockType::Water,
+            "breached basin water must flow back into the hole"
+        );
     }
 
     #[test]
@@ -880,6 +943,10 @@ mod tests {
             ChunkCoord { x: -1, z: 0 },
             ChunkCoord { x: 0, z: 1 },
             ChunkCoord { x: 0, z: -1 },
+            ChunkCoord { x: 1, z: 1 },
+            ChunkCoord { x: 1, z: -1 },
+            ChunkCoord { x: -1, z: 1 },
+            ChunkCoord { x: -1, z: -1 },
         ] {
             loaded.insert(neighbor);
         }
@@ -887,12 +954,21 @@ mod tests {
 
         let frontier = ChunkCoord { x: radius, z: 0 };
         loaded.insert(frontier);
+        // In-radius neighbours of the frontier column, including the two
+        // diagonals ambient occlusion samples. (radius, ±1) and beyond sit
+        // outside the wanted circle, so the gate must not require them.
         loaded.insert(ChunkCoord {
             x: radius - 1,
             z: 0,
         });
-        loaded.insert(ChunkCoord { x: radius, z: 1 });
-        loaded.insert(ChunkCoord { x: radius, z: -1 });
+        loaded.insert(ChunkCoord {
+            x: radius - 1,
+            z: 1,
+        });
+        loaded.insert(ChunkCoord {
+            x: radius - 1,
+            z: -1,
+        });
         assert!(column_ready_for_meshing(&loaded, player, frontier, radius));
     }
 }

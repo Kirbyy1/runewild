@@ -32,6 +32,16 @@ pub enum TreeKind {
     AutumnOak,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroundKind {
+    Pebble,
+    Rock,
+    Boulder,
+    MegaBoulder,
+    FallenLog,
+    Bush,
+}
+
 /// A fully resolved tree shape. The crown radius is derived from the trunk
 /// height so proportions stay believable across the whole height range.
 #[derive(Debug, Clone, Copy)]
@@ -240,6 +250,15 @@ impl TreeKind {
         }
     }
 
+    /// Typical trunk footprint width used for ground-clearance rules.
+    pub fn thickness(self) -> u32 {
+        match self {
+            TreeKind::Giant | TreeKind::JungleGiant => 3,
+            TreeKind::WideOak | TreeKind::SwampWillow => 2,
+            _ => 1,
+        }
+    }
+
     /// Downgrade chain when a large candidate loses its spacing contest.
     /// Keeps density up while enforcing size separation deterministically.
     pub fn downgrade(self) -> Option<TreeKind> {
@@ -260,8 +279,7 @@ fn pine(kind: TreeKind, trunk_h: i32, crown_radius: i32, wood: BlockType) -> Tre
         trunk_h,
         thickness: 1,
         crown_radius,
-        // Tapered cone occupies most of the trunk - never a bare pole.
-        crown_height: (trunk_h - 2).max(2),
+        crown_height: (trunk_h - 2).max(3),
         wood,
         leaf: BlockType::PineLeaves,
         roots: false,
@@ -269,80 +287,140 @@ fn pine(kind: TreeKind, trunk_h: i32, crown_radius: i32, wood: BlockType) -> Tre
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TreeVoxel {
     pub coord: VoxelCoord,
     pub block: BlockType,
 }
 
-/// Ground decoration kinds placed by the contextual decor pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroundKind {
-    Pebble,
-    Rock,
-    Boulder,
-    MegaBoulder,
-    FallenLog,
-    Bush,
-}
-
-/// Builds the full voxel list for one tree.
+/// Generates one tree rooted at `base` using the pre-resolved `spec`.
 pub fn build_tree(seed: u64, base: VoxelCoord, spec: &TreeSpec) -> Vec<TreeVoxel> {
-    let mut out = Vec::with_capacity(160);
-    let top_y = base.y + spec.trunk_h;
+    let mut out = Vec::with_capacity(256);
 
-    if spec.roots {
-        for (dx, dz) in [(1i32, 0), (-1, 0), (0, 1), (0, -1)] {
-            if !hash(seed, base.x + dx * 3, base.z + dz * 3, 41).is_multiple_of(4) {
-                push(&mut out, base.offset(dx, 0, dz), spec.wood);
-                if spec.thickness > 1 {
-                    push(&mut out, base.offset(dx, 1, dz), spec.wood);
+    // Step 1: Trunk column(s).
+    let trunk_top_y = match spec.thickness {
+        1 => {
+            // Tapered trunk: root flare at the base, a plus-shaped lower
+            // third, then a 1x1 column. Kills the "planted fence post" read.
+            for dy in 0..spec.trunk_h {
+                if dy == 0 {
+                    push(&mut out, base, spec.wood);
+                    push(&mut out, base.offset(1, 0, 0), spec.wood);
+                    push(&mut out, base.offset(0, 0, 1), spec.wood);
+                    continue;
+                }
+                if dy * 3 < spec.trunk_h {
+                    push(&mut out, base.offset(0, dy, 0), spec.wood);
+                    push(&mut out, base.offset(1, dy, 0), spec.wood);
+                    push(&mut out, base.offset(0, dy, 1), spec.wood);
+                } else {
+                    push(&mut out, base.offset(0, dy, 0), spec.wood);
                 }
             }
+            base.y + spec.trunk_h
         }
-    }
-
-    for dy in 0..spec.trunk_h {
-        match spec.thickness {
-            3 => {
-                push(&mut out, base.offset(0, dy, 0), spec.wood);
-                if dy < spec.trunk_h * 2 / 3 {
+        2 => {
+            // 3x3-plus flare settling into a 2x2 column.
+            const FLARE: [(i32, i32); 12] = [
+                (0, 0),
+                (1, 0),
+                (0, 1),
+                (1, 1),
+                (-1, 0),
+                (-1, 1),
+                (2, 0),
+                (2, 1),
+                (0, -1),
+                (1, -1),
+                (0, 2),
+                (1, 2),
+            ];
+            for dy in 0..spec.trunk_h {
+                if dy <= 1 {
+                    for (dx, dz) in FLARE {
+                        push(&mut out, base.offset(dx, dy, dz), spec.wood);
+                    }
+                } else {
+                    push(&mut out, base.offset(0, dy, 0), spec.wood);
                     push(&mut out, base.offset(1, dy, 0), spec.wood);
                     push(&mut out, base.offset(0, dy, 1), spec.wood);
                     push(&mut out, base.offset(1, dy, 1), spec.wood);
                 }
             }
-            2 => {
-                push(&mut out, base.offset(0, dy, 0), spec.wood);
-                push(&mut out, base.offset(1, dy, 0), spec.wood);
-                push(&mut out, base.offset(0, dy, 1), spec.wood);
-                push(&mut out, base.offset(1, dy, 1), spec.wood);
+            base.y + spec.trunk_h
+        }
+        _ => {
+            // Thick base (3x3 at root) tapering up to a 2x2 column, then 1x1.
+            for dy in 0..spec.trunk_h {
+                let r: i32 = if dy < spec.trunk_h - 3 { 1 } else { 0 };
+                for dx in -r..=r {
+                    for dz in -r..=r {
+                        if dy == 0 || (dx.abs() + dz.abs() <= r + 1) {
+                            push(&mut out, base.offset(dx, dy, dz), spec.wood);
+                        }
+                    }
+                }
             }
-            _ => push(&mut out, base.offset(0, dy, 0), spec.wood),
+            base.y + spec.trunk_h
+        }
+    };
+
+    // Step 2: Buttress roots for heavy archetypes.
+    if spec.roots {
+        add_buttress_roots(seed, base, spec.thickness, spec.wood, &mut out);
+    }
+
+    // Step 3: Canopy builder specific to archetype.
+    match spec.kind {
+        TreeKind::YoungOak => {
+            branching_crown(seed, base, spec, 2, &mut out);
+        }
+        TreeKind::Oak | TreeKind::AutumnOak => {
+            branching_crown(seed, base, spec, 3, &mut out);
+        }
+        TreeKind::TallOak => {
+            branching_crown(seed, base, spec, 4, &mut out);
+            lower_bough(seed, base, spec, &mut out);
+        }
+        TreeKind::WideOak => {
+            branching_crown(seed, base, spec, 5, &mut out);
+            lower_bough(seed, base, spec, &mut out);
+        }
+        TreeKind::Birch => {
+            birch_crown(seed, base, spec, &mut out);
+        }
+        TreeKind::Giant | TreeKind::JungleGiant => {
+            giant_umbrella(seed, base, spec, &mut out);
+        }
+        TreeKind::PineSmall | TreeKind::PineMedium | TreeKind::PineTall | TreeKind::PineSnowy => {
+            layered_conifer(seed, base, spec, &mut out);
+        }
+        TreeKind::JungleMedium => {
+            branching_crown(seed, base, spec, 4, &mut out);
+            if spec.vines {
+                hang_vines(
+                    seed,
+                    base.offset(0, spec.trunk_h - 1, 0),
+                    spec.crown_radius,
+                    spec.leaf,
+                    &mut out,
+                );
+            }
+        }
+        TreeKind::Palm => {
+            rosette(seed, base, trunk_top_y, spec, &mut out);
+        }
+        TreeKind::Acacia => {
+            acacia_crown(seed, base, spec, &mut out);
+        }
+        TreeKind::SwampWillow => {
+            willow_crown(seed, base, spec, &mut out);
         }
     }
 
-    match spec.kind {
-        TreeKind::Palm => rosette(seed, base, top_y, spec, &mut out),
-        TreeKind::Acacia => acacia_crown(seed, base, spec, &mut out),
-        TreeKind::Giant | TreeKind::JungleGiant => ancient_crown(seed, base, spec, &mut out),
-        TreeKind::JungleMedium => branching_crown(seed, base, spec, 5, &mut out),
-        TreeKind::SwampWillow => willow_crown(seed, base, spec, &mut out),
-        TreeKind::Birch => birch_crown(seed, base, spec, &mut out),
-        _ if is_conifer(spec.kind) => layered_conifer(seed, base, spec, &mut out),
-        _ => branching_crown(seed, base, spec, 4, &mut out),
-    }
-
     deduplicate_tree(&mut out);
-    retain_connected_to_trunk(&mut out, base);
+    retain_connected_to_trunk(base, &mut out);
     out
-}
-
-fn is_conifer(kind: TreeKind) -> bool {
-    matches!(
-        kind,
-        TreeKind::PineSmall | TreeKind::PineMedium | TreeKind::PineTall | TreeKind::PineSnowy
-    )
 }
 
 const BRANCH_DIRECTIONS: [(i32, i32); 8] = [
@@ -356,8 +434,6 @@ const BRANCH_DIRECTIONS: [(i32, i32); 8] = [
     (1, -1),
 ];
 
-/// Broadleaf crown made from a central mass and offset branch lobes. The
-/// overlapping lobes create an irregular outline without detached leaves.
 fn branching_crown(
     seed: u64,
     base: VoxelCoord,
@@ -366,6 +442,7 @@ fn branching_crown(
     out: &mut Vec<TreeVoxel>,
 ) {
     let center_y = spec.trunk_h - 1;
+    // Central dome
     leaf_cluster(
         seed,
         base.offset(0, center_y, 0),
@@ -373,6 +450,16 @@ fn branching_crown(
         (spec.crown_height / 2).max(2),
         spec.leaf,
         101,
+        out,
+    );
+    // Upper crown cap for lush rounded volume
+    leaf_cluster(
+        seed,
+        base.offset(0, center_y + 1, 0),
+        (spec.crown_radius - 2).max(1),
+        (spec.crown_height / 3).max(1),
+        spec.leaf,
+        105,
         out,
     );
 
@@ -384,6 +471,8 @@ fn branching_crown(
             .max(2);
         let rise = if arm.is_multiple_of(3) { 2 } else { 1 };
         let end = grow_branch(base, center_y - 1, direction, length, rise, spec.wood, out);
+
+        // Terminal foliage cluster at branch tip
         leaf_cluster(
             seed,
             end,
@@ -393,39 +482,108 @@ fn branching_crown(
             109 + arm as i32 * 11,
             out,
         );
+
+        // Mid-branch foliage cluster to blend seamlessly with the main canopy
+        if length >= 3 {
+            let mid_x = direction.0 * (length / 2);
+            let mid_z = direction.1 * (length / 2);
+            let mid_y = center_y - 1 + rise / 2;
+            leaf_cluster(
+                seed,
+                base.offset(mid_x, mid_y, mid_z),
+                (spec.crown_radius / 3 + 1).max(1),
+                1,
+                spec.leaf,
+                113 + arm as i32 * 7,
+                out,
+            );
+        }
+    }
+
+    // Sparse clumps dangling from the crown rim break up the dome
+    // silhouette; anchors that miss the canopy are pruned by the
+    // connectivity pass.
+    let droops = arms.min(4) as i32;
+    for droop in 0..droops {
+        if hash(seed, base.x + droop * 13, base.z - droop * 7, 127) % 100 >= 45 {
+            continue;
+        }
+        let direction = BRANCH_DIRECTIONS[((rotation as i32 + droop * 3) % 8) as usize];
+        let rim = (spec.crown_radius - 2).max(1);
+        let anchor = base.offset(direction.0 * rim, center_y - 1, direction.1 * rim);
+        let length = 1 + (hash(seed, anchor.x, anchor.z, 137) % 2) as i32;
+        for drop in 0..length {
+            push(out, anchor.offset(0, -drop, 0), spec.leaf);
+        }
     }
 }
 
-fn ancient_crown(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<TreeVoxel>) {
-    let fork_y = spec.trunk_h * 2 / 3;
-    let rotation = (hash(seed, base.x, base.z, 127) % 8) as usize;
+/// One bare bough partway up the trunk: visible wood below the crown gives
+/// mature trees character instead of a pole plugging into foliage.
+fn lower_bough(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<TreeVoxel>) {
+    let y = (spec.trunk_h * 2 / 5).max(2);
+    let direction = BRANCH_DIRECTIONS[(hash(seed, base.x, base.z, 613) % 8) as usize];
+    grow_branch(
+        base,
+        y,
+        direction,
+        2 + (hash(seed, base.x, base.z, 617) % 2) as i32,
+        0,
+        spec.wood,
+        out,
+    );
+}
+
+fn add_buttress_roots(
+    seed: u64,
+    base: VoxelCoord,
+    thickness: u32,
+    wood: BlockType,
+    out: &mut Vec<TreeVoxel>,
+) {
+    let offset_span = thickness as i32;
+    for (index, (dx, dz)) in [(1, 0), (-1, 0), (0, 1), (0, -1)].into_iter().enumerate() {
+        let length = 1 + (hash(seed, base.x + dx, base.z + dz, 131 + index as i32) % 3) as i32;
+        let mut x = if dx > 0 { offset_span } else { dx };
+        let mut z = if dz > 0 { offset_span } else { dz };
+        for step in 0..length {
+            let h = (length - step).max(1);
+            for y in -1..h {
+                push(out, base.offset(x, y, z), wood);
+            }
+            x += dx;
+            z += dz;
+        }
+    }
+}
+
+/// Wide umbrella crown for giants: multi-tiered pads with thick branch arms.
+fn giant_umbrella(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<TreeVoxel>) {
+    let fork_y = spec.trunk_h - 2;
     for arm in 0..6usize {
-        let direction = BRANCH_DIRECTIONS[(rotation + arm) % 8];
-        let length = spec.crown_radius - 1 + i32::from(arm.is_multiple_of(2));
+        let direction = BRANCH_DIRECTIONS[(arm * 8 / 6) % 8];
         let end = grow_branch(
             base,
-            fork_y + (arm % 3) as i32,
+            fork_y,
             direction,
-            length,
-            3 + (arm % 2) as i32,
+            spec.crown_radius - 1,
+            2,
             spec.wood,
             out,
         );
-        leaf_cluster(
+        flat_leaf_pad(
             seed,
             end,
-            3 + (arm % 2) as i32,
-            3,
+            spec.crown_radius / 2 + 1,
             spec.leaf,
-            131 + arm as i32 * 13,
+            191 + arm as i32 * 7,
             out,
         );
     }
-    leaf_cluster(
+    flat_leaf_pad(
         seed,
-        base.offset(0, spec.trunk_h, 0),
-        4,
-        3,
+        base.offset(0, spec.trunk_h + 1, 0),
+        spec.crown_radius - 1,
         spec.leaf,
         197,
         out,
@@ -445,11 +603,21 @@ fn ancient_crown(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<Tre
 /// umbrella silhouette while avoiding the old perfectly circular plate.
 fn acacia_crown(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<TreeVoxel>) {
     let rotation = (hash(seed, base.x, base.z, 149) % 8) as usize;
+    // Central flat pad at trunk top
+    flat_leaf_pad(
+        seed,
+        base.offset(0, spec.trunk_h, 0),
+        (spec.crown_radius - 1).max(2),
+        spec.leaf,
+        179,
+        out,
+    );
+
     for arm in 0..3usize {
         let direction = BRANCH_DIRECTIONS[(rotation + arm * 3) % 8];
         let end = grow_branch(
             base,
-            spec.trunk_h - 1,
+            spec.trunk_h,
             direction,
             spec.crown_radius - 1,
             1,
@@ -458,14 +626,6 @@ fn acacia_crown(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<Tree
         );
         flat_leaf_pad(seed, end, 3, spec.leaf, 151 + arm as i32 * 7, out);
     }
-    flat_leaf_pad(
-        seed,
-        base.offset(0, spec.trunk_h, 0),
-        3,
-        spec.leaf,
-        179,
-        out,
-    );
 }
 
 fn willow_crown(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<TreeVoxel>) {
@@ -473,12 +633,13 @@ fn willow_crown(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<Tree
     let crown_y = spec.trunk_h + 1;
     let r = spec.crown_radius;
     for (index, (dx, dz)) in BRANCH_DIRECTIONS.into_iter().enumerate() {
-        let length = 2 + (hash(seed, base.x + dx, base.z + dz, 211) % 3) as i32;
-        let anchor = base.offset(dx * (r - 1), crown_y, dz * (r - 1));
+        let length = 2 + (hash(seed, base.x + dx, base.z + dz, 211) % 4) as i32;
+        let anchor = base.offset(dx * (r - 1), crown_y - 1, dz * (r - 1));
         // Bridge the hanging strand back into the crown rim.
         push(out, anchor.offset(-dx, 0, -dz), spec.leaf);
-        for drop in 0..length {
-            if drop == length - 1 && index.is_multiple_of(3) {
+        push(out, anchor, spec.leaf);
+        for drop in 1..=length {
+            if drop == length && index.is_multiple_of(3) {
                 continue;
             }
             push(out, anchor.offset(0, -drop, 0), spec.leaf);
@@ -488,22 +649,29 @@ fn willow_crown(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<Tree
 
 fn birch_crown(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<TreeVoxel>) {
     let bottom = (spec.trunk_h - spec.crown_height).max(2);
+    let span = (spec.trunk_h - bottom).max(1);
     for (layer, y) in (bottom..=spec.trunk_h).step_by(2).enumerate() {
-        let radius = if y == spec.trunk_h {
-            1
-        } else {
+        let t = (y - bottom) as f64 / span as f64;
+        let radius = if t < 0.25 {
+            (spec.crown_radius - 1).max(2)
+        } else if t < 0.65 {
             spec.crown_radius
+        } else if t < 0.90 {
+            (spec.crown_radius - 1).max(2)
+        } else {
+            1
         };
         leaf_cluster(
             seed,
             base.offset(0, y, 0),
             radius,
-            2,
+            1,
             spec.leaf,
             223 + layer as i32 * 5,
             out,
         );
     }
+    push(out, base.offset(0, spec.trunk_h + 1, 0), spec.leaf);
 }
 
 /// Palm crown: a stepped wind-shaped trunk tip and asymmetric drooping fronds.
@@ -598,21 +766,25 @@ fn block_priority(block: BlockType) -> u8 {
     }
 }
 
-fn retain_connected_to_trunk(out: &mut Vec<TreeVoxel>, base: VoxelCoord) {
-    let occupied: HashSet<_> = out.iter().map(|voxel| voxel.coord).collect();
-    if !occupied.contains(&base) {
-        out.clear();
-        return;
-    }
-    let mut connected = HashSet::from([base]);
-    let mut queue = VecDeque::from([base]);
-    while let Some(coord) = queue.pop_front() {
+/// Prunes any leaf/vine/snow voxel that cannot reach the trunk through
+/// a continuous path of 6-connected neighbor voxels.
+fn retain_connected_to_trunk(base: VoxelCoord, out: &mut Vec<TreeVoxel>) {
+    let occupied: HashSet<VoxelCoord> = out.iter().map(|v| v.coord).collect();
+    let mut connected = HashSet::with_capacity(out.len());
+    let mut pending = VecDeque::new();
+
+    // The trunk base is always grounded.
+    connected.insert(base);
+    pending.push_back(base);
+
+    while let Some(coord) = pending.pop_front() {
         for neighbor in face_neighbors(coord) {
             if occupied.contains(&neighbor) && connected.insert(neighbor) {
-                queue.push_back(neighbor);
+                pending.push_back(neighbor);
             }
         }
     }
+
     out.retain(|voxel| connected.contains(&voxel.coord));
 }
 
@@ -627,111 +799,20 @@ fn face_neighbors(coord: VoxelCoord) -> [VoxelCoord; 6] {
     ]
 }
 
-/// Builds one ground decoration (rocks, logs, bushes).
-pub fn build_ground(
-    seed: u64,
-    base: VoxelCoord,
-    kind: GroundKind,
-    bush_leaf: BlockType,
-) -> Vec<TreeVoxel> {
-    let mut out = Vec::with_capacity(32);
-    let stone = match hash(seed, base.x, base.z, 211) % 3 {
-        0 => BlockType::MossStone,
-        1 => BlockType::Stone,
-        _ => BlockType::Gravel,
-    };
-    match kind {
-        GroundKind::Pebble => push(&mut out, base, stone),
-        GroundKind::Rock => {
-            push(&mut out, base, stone);
-            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                if hash(seed, base.x + dx, base.z + dz, 213).is_multiple_of(2) {
-                    push(&mut out, base.offset(dx, 0, dz), stone);
-                }
-            }
-            if hash(seed, base.x, base.z, 217).is_multiple_of(3) {
-                push(&mut out, base.offset(0, 1, 0), stone);
-            }
-        }
-        GroundKind::Boulder | GroundKind::MegaBoulder => {
-            let r = if kind == GroundKind::MegaBoulder {
-                3
-            } else {
-                2
-            };
-            for dx in -r..=r {
-                for dz in -r..=r {
-                    for dy in 0..=r {
-                        let dist = (dx * dx + dz * dz) as f64 + (dy as f64 * 1.6).powi(2);
-                        if dist <= (r as f64 + 0.4).powi(2)
-                            && !(dist > (r * r) as f64
-                                && hash(seed, base.x + dx * 7, base.z + dz * 7 + dy, 223) % 100
-                                    < 35)
-                        {
-                            push(&mut out, base.offset(dx, dy, dz), stone);
-                        }
-                    }
-                }
-            }
-        }
-        GroundKind::FallenLog => {
-            let dir = match hash(seed, base.x, base.z, 181) % 4 {
-                0 => (1, 0),
-                1 => (-1, 0),
-                2 => (0, 1),
-                _ => (0, -1),
-            };
-            let length = 3 + (hash(seed, base.x, base.z, 193) % 4) as i32;
-            for i in 0..length {
-                let block = if i == 0 || i == length - 1 {
-                    BlockType::MossStone
-                } else {
-                    BlockType::Wood
-                };
-                push(&mut out, base.offset(dir.0 * i, 0, dir.1 * i), block);
-            }
-            // Occasional branch stub / regrowth on top of the log.
-            let mid = length / 2;
-            if hash(seed, base.x, base.z, 227).is_multiple_of(3) {
-                push(
-                    &mut out,
-                    base.offset(dir.0 * mid, 1, dir.1 * mid),
-                    bush_leaf,
-                );
-            }
-        }
-        GroundKind::Bush => {
-            let r = 1 + (hash(seed, base.x, base.z, 233) % 2) as i32;
-            for dx in -r..=r {
-                for dz in -r..=r {
-                    for dy in 0..2 {
-                        let dist = (dx * dx + dz * dz) + dy * dy;
-                        if dist <= r * r
-                            && !hash(seed, base.x + dx, base.z + dz + dy, 239).is_multiple_of(5)
-                        {
-                            push(&mut out, base.offset(dx, dy, dz), bush_leaf);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-pub fn hash01(seed: u64, x: i32, z: i32, salt: i32) -> f32 {
-    (hash(seed, x, z, salt) as f32) / (u32::MAX as f32)
-}
-
 pub fn hash(seed: u64, x: i32, z: i32, salt: i32) -> u32 {
-    let mut n = seed ^ ((x as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    n ^= (z as i64 as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    n ^= (salt as i64 as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
+    let mut n = seed
+        ^ ((x as i64) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ ((z as i64) as u64).wrapping_mul(0x517C_C1B7_2722_0A95)
+        ^ ((salt as i64) as u64).wrapping_mul(0x6C62_272E_07BB_0142);
     n ^= n >> 30;
     n = n.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     n ^= n >> 27;
     n = n.wrapping_mul(0x94D0_49BB_1331_11EB);
     (n ^ (n >> 31)) as u32
+}
+
+pub fn hash01(seed: u64, x: i32, z: i32, salt: i32) -> f32 {
+    (hash(seed, x, z, salt) as f64 / u32::MAX as f64) as f32
 }
 
 /// Hanging vine strands under canopy rims.
@@ -755,30 +836,37 @@ fn hang_vines(
     }
 }
 
-/// A stepped conifer with separated bough tiers. Small gaps between layers
-/// keep the outline readable instead of producing one solid pyramid.
+/// A stepped conifer with separated bough tiers and drooping tips.
 fn layered_conifer(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<TreeVoxel>) {
     let start = 2.max(spec.trunk_h - spec.crown_height);
     let crown_span = (spec.trunk_h - start).max(1);
-    for (tier, y) in (start..spec.trunk_h).step_by(2).enumerate() {
+    for y in (start..spec.trunk_h).step_by(2) {
         let t = (y - start) as f64 / crown_span as f64;
         let radius = (((1.0 - t) * spec.crown_radius as f64).ceil() as i32).max(1);
         for dx in -radius..=radius {
             for dz in -radius..=radius {
-                let edge = dx.abs() + dz.abs();
-                if edge <= radius + 1
-                    && !(edge == radius + 1
-                        && hash(seed, base.x + dx, base.z + dz + y, 241) % 100 < 42)
-                {
+                let dist = dx.abs() + dz.abs();
+                if dist <= radius + 1 {
                     push(out, base.offset(dx, y, dz), spec.leaf);
-                    if edge <= (radius - 1).max(0) && (dx + dz + tier as i32) % 3 != 0 {
+                    // Tier skirt: droop 1 block at outer tips if not bottom of tree
+                    if dist == radius + 1
+                        && y > start
+                        && radius > 1
+                        && hash(seed, base.x + dx, base.z + dz + y, 241) % 100 < 85
+                    {
+                        push(out, base.offset(dx, y - 1, dz), spec.leaf);
+                    }
+                    // Upper tier layer: inward layer above
+                    if dist <= (radius - 1).max(0) && y + 1 < spec.trunk_h {
                         push(out, base.offset(dx, y + 1, dz), spec.leaf);
                     }
                 }
             }
         }
     }
+    // Spire peak at trunk top
     push(out, base.offset(0, spec.trunk_h, 0), spec.leaf);
+
     if spec.kind == TreeKind::PineSnowy {
         for y in (start + 2..spec.trunk_h).step_by(2) {
             let t = (y - start) as f64 / crown_span as f64;
@@ -786,7 +874,17 @@ fn layered_conifer(seed: u64, base: VoxelCoord, spec: &TreeSpec, out: &mut Vec<T
             for dx in -radius..=radius {
                 for dz in -radius..=radius {
                     if dx.abs() + dz.abs() <= radius {
-                        push(out, base.offset(dx, y, dz), BlockType::Snow);
+                        let top_y =
+                            if dx.abs() + dz.abs() <= (radius - 1).max(0) && y + 1 < spec.trunk_h {
+                                y + 2
+                            } else {
+                                y + 1
+                            };
+                        push(
+                            out,
+                            base.offset(dx, top_y.min(spec.trunk_h), dz),
+                            BlockType::Snow,
+                        );
                     }
                 }
             }
@@ -809,16 +907,20 @@ fn grow_branch(
         let target_x = direction.0 * step;
         let target_z = direction.1 * step;
         let target_y = start_y + rise * step / length.max(1);
-        while current.x != base.x + target_x {
-            current.x += (base.x + target_x - current.x).signum();
-            push(out, current, wood);
-        }
-        while current.z != base.z + target_z {
-            current.z += (base.z + target_z - current.z).signum();
-            push(out, current, wood);
-        }
-        while current.y != base.y + target_y {
-            current.y += (base.y + target_y - current.y).signum();
+        // Advance all three axes in lockstep instead of finishing one axis
+        // at a time: diagonal branches read as straight struts while every
+        // intermediate voxel keeps the strand 6-connected.
+        while current.x != base.x + target_x
+            || current.y != base.y + target_y
+            || current.z != base.z + target_z
+        {
+            if current.x != base.x + target_x {
+                current.x += (base.x + target_x - current.x).signum();
+            } else if current.y != base.y + target_y {
+                current.y += (base.y + target_y - current.y).signum();
+            } else {
+                current.z += (base.z + target_z - current.z).signum();
+            }
             push(out, current, wood);
         }
     }
@@ -840,12 +942,37 @@ fn leaf_cluster(
                 let horizontal = (dx * dx + dz * dz) as f64 / (radius * radius).max(1) as f64;
                 let vertical = (dy * dy) as f64 / (half_height * half_height).max(1) as f64;
                 let distance = horizontal + vertical;
-                if distance > 1.18 {
+                if distance > 1.25 {
                     continue;
                 }
-                let edge_roll =
-                    hash(seed, center.x + dx * 5 + dy, center.z + dz * 7 - dy, salt) % 100;
-                if distance > 0.70 && edge_roll < 24 {
+                if dx.abs() == radius
+                    && dz.abs() == radius
+                    && (dy.abs() == half_height || radius > 2)
+                {
+                    continue;
+                }
+                // Hollow the core so crowns carry dappled interior gaps
+                // instead of solid mass.
+                if distance < 0.4 && hash(seed, center.x + dx, center.z + dz, salt + 3) % 100 < 35 {
+                    continue;
+                }
+                // Punch sparse openings in the underside near the trunk so
+                // light shafts reach the forest floor.
+                if dy == -half_height
+                    && horizontal < 0.5
+                    && hash(seed, center.x + dx, center.z + dz, salt + 5) % 100 < 55
+                {
+                    continue;
+                }
+                // Rim gaps come in clumped bites (coarse-correlated hash),
+                // not single-voxel pinpricks.
+                let edge_roll = hash(
+                    seed,
+                    center.x + (dx / 2) * 5 + dy,
+                    center.z + (dz / 2) * 7 - dy,
+                    salt,
+                ) % 100;
+                if distance > 1.05 && edge_roll < 22 && (dx.abs() > 1 || dz.abs() > 1) {
                     continue;
                 }
                 push(out, center.offset(dx, dy, dz), leaf);
@@ -869,13 +996,70 @@ fn flat_leaf_pad(
                 let distance = dx * dx + dz * dz;
                 if distance <= layer_radius * layer_radius + 1
                     && !(distance > (layer_radius - 1).max(0).pow(2)
-                        && hash(seed, center.x + dx, center.z + dz, salt + dy) % 100 < 28)
+                        && hash(seed, center.x + dx, center.z + dz, salt + dy) % 100 < 12)
                 {
                     push(out, center.offset(dx, dy, dz), leaf);
                 }
             }
         }
     }
+}
+
+/// Generates ground features (shrubs, fallen logs, rocks, boulders).
+pub fn build_ground(
+    seed: u64,
+    base: VoxelCoord,
+    kind: GroundKind,
+    leaf: BlockType,
+) -> Vec<TreeVoxel> {
+    let mut out = Vec::new();
+    match kind {
+        GroundKind::Pebble => {
+            push(&mut out, base, BlockType::Gravel);
+        }
+        GroundKind::Rock => {
+            push(&mut out, base, BlockType::MossStone);
+        }
+        GroundKind::Boulder => {
+            for dx in 0..=1 {
+                for dz in 0..=1 {
+                    push(&mut out, base.offset(dx, 0, dz), BlockType::MossStone);
+                }
+            }
+            push(&mut out, base.offset(0, 1, 0), BlockType::MossStone);
+        }
+        GroundKind::MegaBoulder => {
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    push(&mut out, base.offset(dx, 0, dz), BlockType::MossStone);
+                    push(&mut out, base.offset(dx, 1, dz), BlockType::MossStone);
+                }
+            }
+            push(&mut out, base.offset(0, 2, 0), BlockType::MossStone);
+        }
+        GroundKind::Bush => {
+            push(&mut out, base, BlockType::Wood);
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    push(&mut out, base.offset(dx, 1, dz), leaf);
+                }
+            }
+            push(&mut out, base.offset(0, 2, 0), leaf);
+        }
+        GroundKind::FallenLog => {
+            let axis_x = hash(seed, base.x, base.z, 307).is_multiple_of(2);
+            let len = 2 + (hash(seed, base.x, base.z, 311) % 3) as i32;
+            for step in 0..len {
+                let offset = if axis_x {
+                    base.offset(step, 0, 0)
+                } else {
+                    base.offset(0, 0, step)
+                };
+                push(&mut out, offset, BlockType::Wood);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

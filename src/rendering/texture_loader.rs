@@ -31,7 +31,7 @@ fn shade(c: Rgb, amount: f32) -> Rgb {
 }
 
 fn posterize(c: Rgb) -> Rgb {
-    let q = |value: u8| ((value as u16 / 8) * 8 + 4).min(255) as u8;
+    let q = |value: u8| ((value as u16 / 2) * 2 + 1).min(255) as u8;
     (q(c.0), q(c.1), q(c.2))
 }
 
@@ -47,7 +47,7 @@ fn paint_tile(
     let origin_y = row * size;
     for y in 0..size {
         for x in 0..size {
-            let (r, g, b) = posterize(paint(x / 2 * 2, y / 2 * 2));
+            let (r, g, b) = posterize(paint(x, y));
             let px = origin_x + x;
             let py = origin_y + y;
             let idx = ((py * atlas_width + px) * 4) as usize;
@@ -85,16 +85,32 @@ fn fbm(noise: &OpenSimplex, x: f64, y: f64, scale: f64) -> f64 {
 fn grass_top_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let noise = OpenSimplex::new(seed);
     let blade_noise = OpenSimplex::new(seed.wrapping_add(1));
-    let base_dark: Rgb = (36, 82, 30);
-    let base_light: Rgb = (66, 122, 48);
+    let flower_noise = OpenSimplex::new(seed.wrapping_add(107));
+    // Desaturated a touch: full-saturation lawns read as toy plastic under
+    // bright sun; the eye expects more yellow in the midtones.
+    let base_dark: Rgb = (66, 134, 50);
+    let base_mid: Rgb = (92, 164, 62);
+    let base_light: Rgb = (126, 196, 88);
     move |x, y| {
-        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.28);
-        let mut c = lerp_color(base_dark, base_light, n as f32 * 0.5 + 0.5);
-        let blade = blade_noise.get([x as f64 / 2.4, y as f64 / 9.0]);
-        if blade > 0.55 {
-            c = shade(c, 1.18);
-        } else if blade < -0.6 {
-            c = shade(c, 0.85);
+        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.26);
+        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+        let mut c = if t < 0.5 {
+            lerp_color(base_dark, base_mid, t * 2.0)
+        } else {
+            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+        };
+        let blade = blade_noise.get([x as f64 / 2.2, y as f64 / 7.5]);
+        if blade > 0.48 {
+            c = shade(c, 1.08);
+        } else if blade < -0.52 {
+            c = shade(c, 0.88);
+        }
+        // Rare tiny meadow flower flecks
+        let flower = flower_noise.get([x as f64 / 1.5, y as f64 / 1.5]);
+        if flower > 0.90 {
+            c = (248, 236, 140);
+        } else if flower < -0.92 {
+            c = (250, 252, 255);
         }
         c
     }
@@ -103,14 +119,27 @@ fn grass_top_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 fn dirt_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let noise = OpenSimplex::new(seed);
     let pebble_noise = OpenSimplex::new(seed.wrapping_add(2));
-    let base_dark: Rgb = (84, 56, 34);
-    let base_light: Rgb = (128, 90, 56);
+    let crumb_noise = OpenSimplex::new(seed.wrapping_add(77));
+    let base_dark: Rgb = (102, 68, 42);
+    let base_mid: Rgb = (132, 92, 58);
+    let base_light: Rgb = (156, 114, 76);
     move |x, y| {
-        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.3);
-        let mut c = lerp_color(base_dark, base_light, n as f32 * 0.5 + 0.5);
-        let pebble = pebble_noise.get([x as f64 / 5.0, y as f64 / 5.0]);
-        if pebble > 0.65 {
-            c = shade(c, 0.72);
+        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.28);
+        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+        let mut c = if t < 0.5 {
+            lerp_color(base_dark, base_mid, t * 2.0)
+        } else {
+            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+        };
+        let pebble = pebble_noise.get([x as f64 / 4.5, y as f64 / 4.5]);
+        if pebble > 0.60 {
+            c = (168, 138, 102); // Rounded gravel pebble
+        } else if pebble < -0.62 {
+            c = shade(c, 0.72); // Soil pocket shadow
+        }
+        let crumb = crumb_noise.get([x as f64 / 1.8, y as f64 / 1.8]);
+        if crumb > 0.55 {
+            c = shade(c, 1.08);
         }
         c
     }
@@ -119,13 +148,20 @@ fn dirt_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 fn grass_side_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let mut grass = grass_top_tile(size, seed);
     let mut dirt = dirt_tile(size, seed.wrapping_add(3));
-    let grass_band = (size as f32 * 0.28) as u32;
-    let transition = (size as f32 * 0.10) as u32;
+    let fringe_noise = OpenSimplex::new(seed.wrapping_add(101));
+    let base_band = (size as f32 * 0.34) as i32;
     move |x, y| {
-        if y < grass_band {
-            grass(x, y)
-        } else if y < grass_band + transition {
-            let t = (y - grass_band) as f32 / transition.max(1) as f32;
+        let drop = (fringe_noise.get([x as f64 / 3.0, 0.0]) * 4.2).round() as i32;
+        let blade_tip = if (x % 3 == 0) && drop > 0 { 2 } else { 0 };
+        let grass_edge = base_band + drop + blade_tip;
+        if (y as i32) < grass_edge {
+            let mut g = grass(x, y);
+            if (y as i32) == grass_edge - 1 {
+                g = shade(g, 0.88); // Shadow on underside of grass blades
+            }
+            g
+        } else if (y as i32) < grass_edge + 2 {
+            let t = ((y as i32) - grass_edge) as f32 / 2.0;
             lerp_color(grass(x, y), dirt(x, y), t)
         } else {
             dirt(x, y)
@@ -136,14 +172,29 @@ fn grass_side_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 fn stone_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let noise = OpenSimplex::new(seed);
     let crack_noise = OpenSimplex::new(seed.wrapping_add(4));
-    let base_dark: Rgb = (90, 92, 96);
-    let base_light: Rgb = (150, 152, 156);
+    let speckle_noise = OpenSimplex::new(seed.wrapping_add(91));
+    let base_dark: Rgb = (128, 134, 142);
+    let base_mid: Rgb = (154, 160, 168);
+    let base_light: Rgb = (182, 188, 196);
     move |x, y| {
         let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.22);
-        let mut c = lerp_color(base_dark, base_light, n as f32 * 0.5 + 0.5);
-        let crack = crack_noise.get([x as f64 / 6.5, y as f64 / 6.5]).abs();
-        if crack < 0.035 {
-            c = shade(c, 0.55);
+        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+        let mut c = if t < 0.5 {
+            lerp_color(base_dark, base_mid, t * 2.0)
+        } else {
+            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+        };
+        let crack = crack_noise.get([x as f64 / 6.0, y as f64 / 6.0]).abs();
+        // Softer cracks: near-black wormy lines on shadowed faces turned
+        // every cliff riser into high-contrast stripes.
+        if crack < 0.026 {
+            c = shade(c, 0.74);
+        } else if crack < 0.055 {
+            c = shade(c, 0.88);
+        }
+        let speckle = speckle_noise.get([x as f64 / 2.0, y as f64 / 2.0]);
+        if speckle > 0.65 {
+            c = (198, 204, 214);
         }
         c
     }
@@ -151,15 +202,27 @@ fn stone_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn sand_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let noise = OpenSimplex::new(seed);
-    let grain_noise = OpenSimplex::new(seed.wrapping_add(5));
-    let base_dark: Rgb = (196, 168, 110);
-    let base_light: Rgb = (232, 206, 148);
+    let ripple_noise = OpenSimplex::new(seed.wrapping_add(5));
+    let grain_noise = OpenSimplex::new(seed.wrapping_add(19));
+    let base_dark: Rgb = (218, 186, 126);
+    let base_mid: Rgb = (238, 208, 148);
+    let base_light: Rgb = (252, 226, 172);
     move |x, y| {
         let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.32);
-        let mut c = lerp_color(base_dark, base_light, n as f32 * 0.5 + 0.5);
-        let grain = grain_noise.get([x as f64 / 1.6, y as f64 / 1.6]);
-        if grain > 0.7 {
-            c = shade(c, 1.12);
+        let ripple = ((x as f32 * 0.35 + (y as f32 * 0.15)).sin() * 0.5 + 0.5) * 0.22;
+        let t = (n as f32 * 0.4 + 0.4 + ripple).clamp(0.0, 1.0);
+        let mut c = if t < 0.5 {
+            lerp_color(base_dark, base_mid, t * 2.0)
+        } else {
+            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+        };
+        let ripple_wave = ripple_noise.get([x as f64 / 7.0, y as f64 / 7.0]);
+        if ripple_wave > 0.55 {
+            c = shade(c, 1.07);
+        }
+        let grain = grain_noise.get([x as f64 / 1.5, y as f64 / 1.5]);
+        if grain > 0.72 {
+            c = (255, 244, 210);
         }
         c
     }
@@ -167,42 +230,76 @@ fn sand_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn wood_top_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let ring_noise = OpenSimplex::new(seed.wrapping_add(6));
-    let base_dark: Rgb = (86, 58, 34);
-    let base_light: Rgb = (156, 112, 68);
+    let bark_outer: Rgb = (82, 54, 32);
+    let base_dark: Rgb = (142, 98, 60);
+    let base_mid: Rgb = (178, 132, 84);
+    let base_light: Rgb = (204, 156, 104);
     let center = size as f32 / 2.0;
     move |x, y| {
         let dx = x as f32 - center;
         let dy = y as f32 - center;
         let dist = (dx * dx + dy * dy).sqrt();
-        let wobble = ring_noise.get([x as f64 / 10.0, y as f64 / 10.0]) as f32 * 2.5;
-        let ring = ((dist + wobble) * 0.9).sin() * 0.5 + 0.5;
-        lerp_color(base_dark, base_light, ring)
+        if dist > center - 2.5 {
+            return bark_outer;
+        }
+        let wobble = ring_noise.get([x as f64 / 8.0, y as f64 / 8.0]) as f32 * 2.2;
+        let ring = ((dist + wobble) * 0.85).sin() * 0.5 + 0.5;
+        let mut c = if ring < 0.5 {
+            lerp_color(base_dark, base_mid, ring * 2.0)
+        } else {
+            lerp_color(base_mid, base_light, (ring - 0.5) * 2.0)
+        };
+        if dist < 3.0 {
+            c = shade(c, 0.85); // Core heartwood
+        }
+        c
     }
 }
 
 fn wood_side_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let bark_noise = OpenSimplex::new(seed.wrapping_add(7));
-    let base_dark: Rgb = (66, 42, 26);
-    let base_light: Rgb = (118, 82, 48);
+    let furrow_noise = OpenSimplex::new(seed.wrapping_add(27));
+    let base_dark: Rgb = (72, 46, 28);
+    let base_mid: Rgb = (108, 74, 46);
+    let base_light: Rgb = (142, 100, 64);
     move |x, y| {
-        let groove = ((x as f64 / 4.2).sin() * 0.5 + 0.5) as f32;
-        let n = bark_noise.get([x as f64 / 3.0, y as f64 / 14.0]) as f32 * 0.5 + 0.5;
-        let t = (groove * 0.65 + n * 0.35).clamp(0.0, 1.0);
-        lerp_color(base_dark, base_light, t)
+        let groove = ((x as f64 / 3.8).sin() * 0.5 + 0.5) as f32;
+        let n = bark_noise.get([x as f64 / 2.8, y as f64 / 12.0]) as f32 * 0.5 + 0.5;
+        let furrow = furrow_noise.get([x as f64 / 5.0, y as f64 / 16.0]);
+        let t = (groove * 0.60 + n * 0.40).clamp(0.0, 1.0);
+        let mut c = if t < 0.5 {
+            lerp_color(base_dark, base_mid, t * 2.0)
+        } else {
+            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+        };
+        if furrow > 0.52 {
+            c = shade(c, 1.12);
+        } else if furrow < -0.52 {
+            c = shade(c, 0.80);
+        }
+        c
     }
 }
 
 fn leaves_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let noise = OpenSimplex::new(seed);
-    let hole_noise = OpenSimplex::new(seed.wrapping_add(8));
-    let base_dark: Rgb = (18, 58, 25);
-    let base_light: Rgb = (44, 104, 42);
+    let clump_noise = OpenSimplex::new(seed.wrapping_add(8));
+    let leaf_light: Rgb = (88, 192, 58);
+    let leaf_mid: Rgb = (54, 150, 42);
+    let leaf_dark: Rgb = (34, 102, 30);
     move |x, y| {
         let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.22);
-        let mut c = lerp_color(base_dark, base_light, n as f32 * 0.5 + 0.5);
-        let hole = hole_noise.get([x as f64 / 4.5, y as f64 / 4.5]);
-        if hole > 0.72 {
-            c = shade(c, 0.6);
+        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+        let mut c = if t < 0.5 {
+            lerp_color(leaf_dark, leaf_mid, t * 2.0)
+        } else {
+            lerp_color(leaf_mid, leaf_light, (t - 0.5) * 2.0)
+        };
+        let clump = clump_noise.get([x as f64 / 3.8, y as f64 / 3.8]);
+        if clump > 0.48 {
+            c = shade(c, 1.18);
+        } else if clump < -0.52 {
+            c = shade(c, 0.78);
         }
         c
     }
@@ -214,22 +311,31 @@ fn water_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn water_tile_frame(size: u32, seed: u32, phase: f32) -> impl FnMut(u32, u32) -> Rgb {
     let wave_noise = OpenSimplex::new(seed.wrapping_add(9));
-    let base_dark: Rgb = (12, 66, 142);
-    let base_light: Rgb = (42, 132, 194);
+    // Deeper, less sky-coloured palette: water should read as blue even
+    // where it reflects a bright horizon.
+    let base_deep: Rgb = (14, 84, 148);
+    let base_mid: Rgb = (28, 124, 192);
+    let base_light: Rgb = (54, 164, 220);
     move |x, y| {
-        // Advancing the sample in V makes the same atlas tile ripple across
-        // horizontal surfaces and stream downward on vertical waterfall faces.
         let flowing_y = (y as f32 + phase) % size as f32;
-        let n = fbm(&wave_noise, x as f64, flowing_y as f64, size as f64 * 0.4);
-        let diagonal = ((x as f32 * 0.42 + flowing_y * 0.24).sin() * 0.5 + 0.5) * 0.22;
-        let crossing = ((x as f32 * 0.17 - flowing_y * 0.31).sin() * 0.5 + 0.5) * 0.10;
-        let mut color = lerp_color(
-            base_dark,
-            base_light,
-            (n as f32 * 0.32 + 0.48 + diagonal + crossing).clamp(0.0, 1.0),
+        let n = fbm(
+            &wave_noise,
+            x as f64 * 0.8,
+            flowing_y as f64 * 0.8,
+            size as f64 * 0.35,
         );
-        if (diagonal + crossing) > 0.27 && (x + y + seed).is_multiple_of(7) {
-            color = lerp_color(color, (148, 220, 228), 0.28);
+        // Gentle swells: high-contrast sine lattices shimmer into moiré
+        // once the 32 px tile minifies across an ocean of blocks.
+        let wave1 = ((x as f32 * 0.38 + flowing_y * 0.28).sin() * 0.5 + 0.5) * 0.16;
+        let wave2 = ((x as f32 * 0.22 - flowing_y * 0.36 + 1.5).cos() * 0.5 + 0.5) * 0.13;
+        let t = (n as f32 * 0.35 + 0.45 + wave1 + wave2).clamp(0.0, 1.0);
+        let mut color = if t < 0.5 {
+            lerp_color(base_deep, base_mid, t * 2.0)
+        } else {
+            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+        };
+        if wave1 + wave2 > 0.22 && n > 0.25 {
+            color = lerp_color(color, (196, 242, 255), 0.22);
         }
         color
     }
@@ -238,17 +344,17 @@ fn water_tile_frame(size: u32, seed: u32, phase: f32) -> impl FnMut(u32, u32) ->
 fn gravel_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let noise = OpenSimplex::new(seed);
     let stones: [Rgb; 5] = [
-        (82, 82, 78),
-        (112, 105, 94),
-        (132, 126, 112),
-        (91, 102, 104),
-        (151, 137, 112),
+        (104, 102, 98),
+        (134, 126, 114),
+        (158, 150, 136),
+        (116, 126, 128),
+        (174, 162, 138),
     ];
     move |x, y| {
-        let cell_x = x / 8;
-        let cell_y = y / 7;
+        let cell_x = x / 7;
+        let cell_y = y / 6;
         let index = ((cell_x * 13 + cell_y * 29 + seed) % stones.len() as u32) as usize;
-        let edge = (x % 8 == 0 || y % 7 == 0) as u8;
+        let edge = (x % 7 == 0 || y % 6 == 0) as u8;
         let n = noise.get([
             x as f64 / (size as f64 * 0.18),
             y as f64 / (size as f64 * 0.18),
@@ -256,9 +362,9 @@ fn gravel_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
         shade(
             stones[index],
             if edge == 1 {
-                0.72
+                0.68
             } else {
-                0.9 + n as f32 * 0.12
+                0.92 + n as f32 * 0.14
             },
         )
     }
@@ -266,24 +372,30 @@ fn gravel_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn snow_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let drifts = OpenSimplex::new(seed);
+    let sparkle_noise = OpenSimplex::new(seed.wrapping_add(41));
+    let base_blue: Rgb = (212, 232, 248);
+    let base_white: Rgb = (252, 254, 255);
     move |x, y| {
-        let n = fbm(&drifts, x as f64, y as f64, size as f64 * 0.34) as f32;
-        let sparkle = (x * 17 + y * 31 + seed).is_multiple_of(97) as u8;
-        if sparkle == 1 {
-            (255, 255, 255)
-        } else {
-            lerp_color((184, 211, 225), (244, 249, 247), n * 0.5 + 0.55)
+        let n = fbm(&drifts, x as f64, y as f64, size as f64 * 0.32) as f32;
+        let mut c = lerp_color(base_blue, base_white, n * 0.5 + 0.6);
+        let sparkle = sparkle_noise.get([x as f64 / 3.0, y as f64 / 3.0]);
+        if sparkle > 0.86 {
+            c = (255, 255, 255);
         }
+        c
     }
 }
 
 fn snow_side_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let mut snow = snow_tile(size, seed);
     let mut stone = stone_tile(size, seed.wrapping_add(19));
-    let cap = size / 4;
+    // Thin stone fringe only: a full stone lower third turned every snowed
+    // riser into a dark stripe and striped whole mountain faces.
+    let cap = size * 7 / 8;
+    let drip_noise = OpenSimplex::new(seed.wrapping_add(33));
     move |x, y| {
-        let drip = ((x * 11 + seed) % 9).min(3);
-        if y < cap + drip {
+        let drip = (drip_noise.get([x as f64 / 3.0, 0.0]) * 3.5).round() as i32;
+        if (y as i32) < cap as i32 + drip {
             snow(x, y)
         } else {
             stone(x, y)
@@ -294,11 +406,15 @@ fn snow_side_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 fn moss_stone_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let mut stone = stone_tile(size, seed);
     let moss = OpenSimplex::new(seed.wrapping_add(23));
+    let moss_light: Rgb = (104, 186, 68);
+    let moss_dark: Rgb = (58, 124, 44);
     move |x, y| {
         let rock = stone(x, y);
-        let patch = moss.get([x as f64 / 13.0, y as f64 / 10.0]);
-        if patch + (1.0 - y as f64 / size as f64) * 0.35 > 0.32 {
-            lerp_color(rock, (74, 118, 58), 0.58)
+        let patch = moss.get([x as f64 / 10.0, y as f64 / 8.0]);
+        if patch + (1.0 - y as f64 / size as f64) * 0.38 > 0.28 {
+            let t = (patch as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+            let moss_col = lerp_color(moss_dark, moss_light, t);
+            lerp_color(rock, moss_col, 0.78)
         } else {
             rock
         }
@@ -307,35 +423,50 @@ fn moss_stone_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn birch_side_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let grain = OpenSimplex::new(seed);
+    let bark_base: Rgb = (238, 236, 226);
+    let bark_light: Rgb = (252, 250, 244);
+    let lenticel_color: Rgb = (42, 38, 34);
+    let lenticel_edge: Rgb = (92, 84, 76);
     move |x, y| {
-        let n = grain.get([x as f64 / 9.0, y as f64 / 18.0]) as f32;
-        let scar = (y % 13 <= 1 && (x + y + seed) % 11 < 5) || (x % 31 == 0);
-        if scar {
-            (58, 55, 49)
-        } else {
-            lerp_color((166, 164, 145), (226, 220, 190), n * 0.5 + 0.55)
+        let n = grain.get([x as f64 / 8.0, y as f64 / 16.0]) as f32;
+        let mut c = lerp_color(bark_base, bark_light, n * 0.5 + 0.5);
+        let notch_y = y % 10;
+        let notch_x = (x + (y / 10) * 11) % 13;
+        if notch_y == 0 && notch_x < 5 {
+            c = lenticel_color;
+        } else if (notch_y == 1 || notch_y == 9) && notch_x < 4 {
+            c = lenticel_edge;
         }
+        c
     }
 }
 
 fn pine_leaves_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let needles = OpenSimplex::new(seed);
+    let base_dark: Rgb = (28, 92, 60);
+    let base_mid: Rgb = (46, 136, 88);
+    let base_light: Rgb = (72, 178, 116);
     move |x, y| {
-        let n = fbm(&needles, x as f64, y as f64, size as f64 * 0.2);
-        lerp_color((18, 56, 40), (44, 102, 62), n as f32 * 0.5 + 0.5)
+        let n = fbm(&needles, x as f64, y as f64, size as f64 * 0.20);
+        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+        if t < 0.5 {
+            lerp_color(base_dark, base_mid, t * 2.0)
+        } else {
+            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+        }
     }
 }
 
 fn jungle_wood_top_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let ring_noise = OpenSimplex::new(seed);
-    let base_dark: Rgb = (94, 62, 36);
-    let base_light: Rgb = (142, 98, 56);
+    let base_dark: Rgb = (108, 68, 38);
+    let base_light: Rgb = (168, 116, 68);
     let center = size as f32 / 2.0;
     move |x, y| {
         let dx = x as f32 - center;
         let dy = y as f32 - center;
         let dist = (dx * dx + dy * dy).sqrt();
-        let wobble = ring_noise.get([x as f64 / 8.0, y as f64 / 8.0]) as f32 * 2.0;
+        let wobble = ring_noise.get([x as f64 / 7.0, y as f64 / 7.0]) as f32 * 2.0;
         let ring = ((dist + wobble) * 1.1).sin() * 0.5 + 0.5;
         lerp_color(base_dark, base_light, ring)
     }
@@ -344,15 +475,15 @@ fn jungle_wood_top_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 fn jungle_wood_side_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let bark_noise = OpenSimplex::new(seed);
     let vine_noise = OpenSimplex::new(seed.wrapping_add(31));
-    let base_dark: Rgb = (82, 52, 28);
-    let base_light: Rgb = (124, 82, 46);
+    let base_dark: Rgb = (98, 60, 34);
+    let base_light: Rgb = (144, 96, 56);
     move |x, y| {
-        let groove = ((x as f64 / 5.0).sin() * 0.5 + 0.5) as f32;
-        let n = bark_noise.get([x as f64 / 4.0, y as f64 / 16.0]) as f32 * 0.5 + 0.5;
+        let groove = ((x as f64 / 4.8).sin() * 0.5 + 0.5) as f32;
+        let n = bark_noise.get([x as f64 / 3.8, y as f64 / 14.0]) as f32 * 0.5 + 0.5;
         let mut c = lerp_color(base_dark, base_light, groove * 0.6 + n * 0.4);
-        let vine = vine_noise.get([x as f64 / 7.0, y as f64 / 12.0]);
-        if vine > 0.45 {
-            c = lerp_color(c, (42, 108, 38), 0.65);
+        let vine = vine_noise.get([x as f64 / 6.0, y as f64 / 10.0]);
+        if vine > 0.42 {
+            c = lerp_color(c, (54, 142, 48), 0.72);
         }
         c
     }
@@ -360,50 +491,56 @@ fn jungle_wood_side_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn jungle_leaves_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let noise = OpenSimplex::new(seed);
-    let base_dark: Rgb = (14, 62, 25);
-    let base_light: Rgb = (34, 108, 40);
+    let base_dark: Rgb = (32, 128, 46);
+    let base_mid: Rgb = (58, 178, 64);
+    let base_light: Rgb = (88, 218, 82);
     move |x, y| {
-        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.25);
-        lerp_color(base_dark, base_light, n as f32 * 0.5 + 0.5)
+        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.24);
+        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+        if t < 0.5 {
+            lerp_color(base_dark, base_mid, t * 2.0)
+        } else {
+            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+        }
     }
 }
 
 fn autumn_leaves_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let noise = OpenSimplex::new(seed);
     let color_noise = OpenSimplex::new(seed.wrapping_add(53));
-    let amber: Rgb = (218, 126, 28);
-    let crimson: Rgb = (194, 52, 24);
-    let gold: Rgb = (235, 178, 36);
+    let amber: Rgb = (236, 138, 32);
+    let crimson: Rgb = (214, 52, 24);
+    let gold: Rgb = (252, 196, 44);
     move |x, y| {
         let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.22);
-        let cn = color_noise.get([x as f64 / 12.0, y as f64 / 12.0]);
-        let base = if cn > 0.15 {
+        let cn = color_noise.get([x as f64 / 10.0, y as f64 / 10.0]);
+        let base = if cn > 0.18 {
             gold
-        } else if cn < -0.15 {
+        } else if cn < -0.18 {
             crimson
         } else {
             amber
         };
-        let variation = n as f32 * 0.2 + 0.9;
+        let variation = n as f32 * 0.25 + 0.88;
         shade(base, variation)
     }
 }
 
 fn palm_leaves_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let frond_noise = OpenSimplex::new(seed);
-    let base_dark: Rgb = (24, 72, 32);
-    let base_light: Rgb = (54, 118, 48);
+    let base_dark: Rgb = (38, 114, 46);
+    let base_light: Rgb = (78, 176, 68);
     move |x, y| {
-        let frond = ((x as f64 * 1.5 + y as f64 * 0.5).sin() * 0.5 + 0.5) as f32;
-        let n = frond_noise.get([x as f64 / 8.0, y as f64 / 8.0]) as f32 * 0.5 + 0.5;
-        lerp_color(base_dark, base_light, frond * 0.6 + n * 0.4)
+        let frond = ((x as f64 * 1.6 + y as f64 * 0.6).sin() * 0.5 + 0.5) as f32;
+        let n = frond_noise.get([x as f64 / 7.0, y as f64 / 7.0]) as f32 * 0.5 + 0.5;
+        lerp_color(base_dark, base_light, frond * 0.65 + n * 0.35)
     }
 }
 
 fn sandstone_top_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let noise = OpenSimplex::new(seed);
-    let base_dark: Rgb = (198, 164, 108);
-    let base_light: Rgb = (226, 194, 138);
+    let base_dark: Rgb = (218, 184, 126);
+    let base_light: Rgb = (244, 216, 160);
     move |x, y| {
         let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.35);
         lerp_color(base_dark, base_light, n as f32 * 0.5 + 0.5)
@@ -412,11 +549,11 @@ fn sandstone_top_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn sandstone_side_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let strata_noise = OpenSimplex::new(seed);
-    let layer1: Rgb = (212, 178, 122);
-    let layer2: Rgb = (186, 148, 96);
-    let layer3: Rgb = (228, 198, 142);
+    let layer1: Rgb = (230, 198, 142);
+    let layer2: Rgb = (204, 168, 114);
+    let layer3: Rgb = (242, 218, 164);
     move |x, y| {
-        let wave = (strata_noise.get([x as f64 / 14.0, 0.0]) * 3.0) as i32;
+        let wave = (strata_noise.get([x as f64 / 12.0, 0.0]) * 3.0) as i32;
         let band = ((y as i32 + wave) / 6) % 3;
         let color = match band.abs() {
             0 => layer1,
@@ -430,12 +567,17 @@ fn sandstone_side_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn terracotta_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let clay_noise = OpenSimplex::new(seed);
-    let bands: [Rgb; 4] = [(186, 96, 62), (158, 76, 48), (204, 118, 78), (172, 84, 54)];
+    let bands: [Rgb; 4] = [
+        (204, 114, 76),
+        (174, 90, 58),
+        (224, 134, 92),
+        (190, 102, 66),
+    ];
     move |x, y| {
-        let wave = (clay_noise.get([x as f64 / 18.0, 0.0]) * 4.0) as i32;
-        let band_idx = (((y as i32 + wave) / 8).rem_euclid(bands.len() as i32)) as usize;
+        let wave = (clay_noise.get([x as f64 / 16.0, 0.0]) * 3.5) as i32;
+        let band_idx = (((y as i32 + wave) / 7).rem_euclid(bands.len() as i32)) as usize;
         let base = bands[band_idx];
-        let detail = clay_noise.get([x as f64 / 5.0, y as f64 / 5.0]) as f32 * 0.1 + 0.95;
+        let detail = clay_noise.get([x as f64 / 4.5, y as f64 / 4.5]) as f32 * 0.1 + 0.95;
         shade(base, detail)
     }
 }
@@ -443,14 +585,14 @@ fn terracotta_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 fn mud_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let noise = OpenSimplex::new(seed);
     let puddle_noise = OpenSimplex::new(seed.wrapping_add(71));
-    let base_dark: Rgb = (68, 48, 32);
-    let base_light: Rgb = (102, 74, 48);
+    let base_dark: Rgb = (82, 56, 38);
+    let base_light: Rgb = (122, 88, 60);
     move |x, y| {
         let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.28);
         let mut c = lerp_color(base_dark, base_light, n as f32 * 0.5 + 0.5);
-        let puddle = puddle_noise.get([x as f64 / 6.0, y as f64 / 6.0]);
-        if puddle > 0.4 {
-            c = shade(c, 0.78);
+        let puddle = puddle_noise.get([x as f64 / 5.5, y as f64 / 5.5]);
+        if puddle > 0.38 {
+            c = shade(c, 0.74);
         }
         c
     }
@@ -459,14 +601,14 @@ fn mud_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 fn ice_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let crystal_noise = OpenSimplex::new(seed);
     let crack_noise = OpenSimplex::new(seed.wrapping_add(89));
-    let base_dark: Rgb = (156, 198, 235);
-    let base_light: Rgb = (212, 236, 252);
+    let base_dark: Rgb = (174, 216, 248);
+    let base_light: Rgb = (230, 248, 255);
     move |x, y| {
         let n = fbm(&crystal_noise, x as f64, y as f64, size as f64 * 0.3);
         let mut c = lerp_color(base_dark, base_light, n as f32 * 0.5 + 0.5);
-        let crack = crack_noise.get([x as f64 / 7.0, y as f64 / 7.0]).abs();
-        if crack < 0.04 {
-            c = (240, 250, 255);
+        let crack = crack_noise.get([x as f64 / 6.0, y as f64 / 6.0]).abs();
+        if crack < 0.042 {
+            c = (248, 254, 255);
         }
         c
     }
@@ -474,45 +616,210 @@ fn ice_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn cactus_top_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let ring_noise = OpenSimplex::new(seed);
-    let base_dark: Rgb = (54, 126, 48);
-    let base_light: Rgb = (88, 168, 68);
+    let base_dark: Rgb = (68, 146, 58);
+    let base_light: Rgb = (106, 192, 84);
     let center = size as f32 / 2.0;
     move |x, y| {
         let dx = x as f32 - center;
         let dy = y as f32 - center;
         let angle = dy.atan2(dx);
         let rib = (angle * 6.0).cos() * 0.5 + 0.5;
-        let n = ring_noise.get([x as f64 / 5.0, y as f64 / 5.0]) as f32 * 0.5 + 0.5;
+        let n = ring_noise.get([x as f64 / 4.5, y as f64 / 4.5]) as f32 * 0.5 + 0.5;
         lerp_color(base_dark, base_light, rib * 0.6 + n * 0.4)
     }
 }
 
 fn cactus_side_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let rib_noise = OpenSimplex::new(seed);
-    let base_dark: Rgb = (48, 118, 42);
-    let base_light: Rgb = (82, 162, 64);
+    let base_dark: Rgb = (58, 136, 52);
+    let base_mid: Rgb = (82, 168, 68);
+    let base_light: Rgb = (112, 198, 92);
     move |x, y| {
-        let rib = ((x as f64 / 5.3).sin() * 0.5 + 0.5) as f32;
-        let n = rib_noise.get([x as f64 / 4.0, y as f64 / 12.0]) as f32 * 0.5 + 0.5;
-        let mut c = lerp_color(base_dark, base_light, rib * 0.7 + n * 0.3);
-        let spine = (x % 11 == 0) && (y % 9 == 0);
-        if spine {
-            c = (220, 215, 180);
+        let rib = ((x as f32 / 4.0).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+        let n = rib_noise.get([x as f64 / 3.0, y as f64 / 8.0]) as f32 * 0.5 + 0.5;
+        let t = (rib * 0.65 + n * 0.35).clamp(0.0, 1.0);
+        let mut c = if t < 0.5 {
+            lerp_color(base_dark, base_mid, t * 2.0)
+        } else {
+            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+        };
+        // Spines at regular rib intervals
+        if (x % 4 == 2) && (y % 6 == 3) {
+            c = (242, 244, 220);
         }
         c
     }
 }
 
-/// Creates the full block texture atlas: one procedurally generated, richly detailed
-/// tile per block face type, arranged in a grid described by `texture_atlas`.
+// ---------------------------------------------------------------------------
+// Ground plant sprites (crossed cutout quads)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum PlantSprite {
+    GrassTuft,
+    Flowers(u8), // 0 yellow, 1 white, 2 red
+    Fern,
+    Mushroom,
+}
+
+/// One pixel of a plant sprite: colour + alpha. Deterministic in
+/// `(seed, x, y)` so the colour and alpha passes always agree.
+fn plant_pixel(x: u32, y: u32, size: u32, seed: u32, sprite: PlantSprite) -> (Rgb, u8) {
+    let hash = |salt: u32| -> u32 {
+        (seed
+            ^ (x.wrapping_mul(0x9E37_79B1))
+            ^ (y.wrapping_mul(0x85EB_CA77))
+            ^ salt.wrapping_mul(0xC2B2_AE35))
+        .wrapping_mul(0x2722_0A95)
+    };
+    let fx = x as f32 + 0.5;
+    let fy = y as f32 + 0.5;
+    let s = size as f32;
+    let from_bottom = s - fy;
+
+    match sprite {
+        PlantSprite::GrassTuft => {
+            // Few, wide, two-toned blades: 1-2 px slivers turn into dithered
+            // static when the 32 px sprite minifies at distance.
+            let blade_count = 7;
+            for blade in 0..blade_count {
+                let root = 2.0 + blade as f32 * ((s - 4.0) / (blade_count - 1) as f32);
+                let lean = ((hash(blade as u32 + 11) % 7) as f32 - 3.0) * 0.5;
+                let height = s * (0.42 + (hash(blade as u32 + 23) % 100) as f32 / 200.0);
+                let tip_shift = lean * (from_bottom / height).clamp(0.0, 1.0);
+                let width = 2.7 - 1.2 * (from_bottom / height).clamp(0.0, 1.0);
+                if from_bottom <= height && (fx - (root + tip_shift)).abs() <= width {
+                    let t = (from_bottom / height).clamp(0.0, 1.0);
+                    // Deliberately darker + richer than the lawn so tufts
+                    // read as foliage accents, never as pale haze.
+                    let base: Rgb = (44, 96, 38);
+                    let tip: Rgb = (108, 178, 72);
+                    let mut c = lerp_color(base, tip, t);
+                    if hash(blade as u32 + 37) % 4 == 0 {
+                        c = shade(c, 0.86);
+                    }
+                    return (c, 255);
+                }
+            }
+            ((0, 0, 0), 0)
+        }
+        PlantSprite::Flowers(variant) => {
+            let stem_x = s * 0.5 + ((hash(5) % 5) as f32 - 2.0);
+            let stem_h = s * (0.42 + (hash(7) % 100) as f32 / 400.0);
+            // Stem
+            if fx >= stem_x - 1.2 && fx <= stem_x + 1.2 && from_bottom <= stem_h {
+                return ((74, 138, 54), 255);
+            }
+            // Head: small petal blob kept low on the stem - a large head on
+            // both crossed quads projects as a flat yellow diamond from
+            // above.
+            let head_cy = s - stem_h - 1.5;
+            let head_dx = fx - stem_x;
+            let head_dy = fy - head_cy;
+            let head_r = s * 0.13;
+            if (head_dx * head_dx + head_dy * head_dy * 1.6).sqrt() <= head_r {
+                let petal: Rgb = match variant {
+                    0 => (244, 208, 66),
+                    1 => (246, 248, 250),
+                    _ => (214, 84, 74),
+                };
+                let center: Rgb = match variant {
+                    0 => (214, 138, 44),
+                    _ => (240, 196, 84),
+                };
+                if head_dx.abs() < head_r * 0.42 && head_dy.abs() < head_r * 0.42 {
+                    return (center, 255);
+                }
+                if hash(13) % 6 == 0 {
+                    return (shade(petal, 0.88), 255);
+                }
+                return (petal, 255);
+            }
+            // A couple of ground leaves
+            if from_bottom < 5.0 && (fx - stem_x).abs() > 1.2 && (fx - stem_x).abs() < 5.0 {
+                let leaf = hash((fx as u32) % 3 + 29) % 4;
+                if leaf == 0 {
+                    return ((86, 152, 60), 255);
+                }
+            }
+            ((0, 0, 0), 0)
+        }
+        PlantSprite::Fern => {
+            let fronds = 5;
+            for frond in 0..fronds {
+                let dir = if frond % 2 == 0 { 1.0 } else { -1.0 };
+                let spread = (frond as f32 - 2.0).abs() * 0.35 + 0.4;
+                let length = s * (0.55 + (hash(frond as u32 + 3) % 100) as f32 / 300.0);
+                for step in 0..(length as i32) {
+                    let t = step as f32;
+                    let px = s * 0.5 + dir * t * spread;
+                    let py = s - 1.0 - t * 0.85 + (t * t) * 0.012;
+                    let dx = (fx - px).abs();
+                    let dy = (fy - py).abs();
+                    // Leaflets alternate on both sides of the rib.
+                    let leaflet = (dx < 2.6 && dy < 1.2) || (dx < 1.2 && dy < 2.4);
+                    if leaflet {
+                        let base: Rgb = (52, 110, 44);
+                        let tip: Rgb = (104, 172, 76);
+                        let c = lerp_color(base, tip, (t / length).clamp(0.0, 1.0));
+                        return (c, 255);
+                    }
+                }
+            }
+            ((0, 0, 0), 0)
+        }
+        PlantSprite::Mushroom => {
+            let stem_cx = s * 0.5;
+            let stem_w = 3.2;
+            let stem_top = s * 0.42;
+            if (fx - stem_cx).abs() <= stem_w && from_bottom <= stem_top {
+                return ((226, 212, 186), 255);
+            }
+            // Cap: half ellipse
+            let cap_cy = stem_top + 2.0;
+            let cap_rx = s * 0.34;
+            let cap_ry = s * 0.20;
+            let nx = (fx - stem_cx) / cap_rx;
+            let ny = (fy - cap_cy) / cap_ry;
+            if ny <= 0.4 && nx * nx + ny * ny <= 1.0 {
+                let c: Rgb = (190, 62, 50);
+                if hash((x / 3) * 7 + (y / 3)) % 7 == 0 {
+                    return ((242, 236, 226), 255);
+                }
+                if ny > 0.1 {
+                    return (shade(c, 0.82), 255);
+                }
+                return (c, 255);
+            }
+            ((0, 0, 0), 0)
+        }
+    }
+}
+
+fn paint_plant_sprite(
+    pixels: &mut [u8],
+    width: u32,
+    size: u32,
+    tile: Tile,
+    seed: u32,
+    sprite: PlantSprite,
+) {
+    let (col, row) = tile.coords();
+    paint_tile(pixels, width, size, col, row, |x, y| {
+        plant_pixel(x, y, size, seed, sprite).0
+    });
+    paint_tile_alpha(pixels, width, size, col, row, |x, y| {
+        plant_pixel(x, y, size, seed, sprite).1
+    });
+}
+
+/// Generates the raw pixel buffer for the full block texture atlas.
 pub fn create_block_texture_atlas() -> (u32, u32, Vec<u8>) {
     let tile_size = ATLAS_TILE_RESOLUTION;
-    let tiles_per_row = ATLAS_TILES_PER_ROW;
-    let tiles_per_col = ATLAS_TILES_PER_COLUMN;
-
-    let width = tile_size * tiles_per_row;
-    let height = tile_size * tiles_per_col;
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let width = ATLAS_TILES_PER_ROW * tile_size;
+    let height = ATLAS_TILES_PER_COLUMN * tile_size;
+    let mut pixels = vec![255_u8; (width * height * 4) as usize];
 
     let tiles: [(Tile, u32); 27] = [
         (Tile::GrassTop, 0),
@@ -543,7 +850,6 @@ pub fn create_block_texture_atlas() -> (u32, u32, Vec<u8>) {
         (Tile::CactusTop, 25),
         (Tile::CactusSide, 26),
     ];
-
     for (tile, kind) in tiles {
         let (col, row) = tile.coords();
         let seed = tile_seed(kind);
@@ -764,11 +1070,70 @@ pub fn create_block_texture_atlas() -> (u32, u32, Vec<u8>) {
                 row,
                 cactus_side_tile(tile_size, seed),
             ),
+            // Ground plant sprites are painted after this loop (they need a
+            // colour and an alpha pass).
+            Tile::GroundGrassTuft
+            | Tile::GroundFlowersYellow
+            | Tile::GroundFlowersWhite
+            | Tile::GroundFlowersRed
+            | Tile::GroundFern
+            | Tile::GroundMushroom => {}
         }
     }
 
-    // Small irregular cutouts keep foliage airy without the large checkerboard
-    // holes that previously dominated whole tree canopies.
+    // Ground plant sprites (row 5): colour + cutout alpha, deterministic
+    // per tile so the two passes always agree.
+    let plant_seed = tile_seed(90);
+    paint_plant_sprite(
+        &mut pixels,
+        width,
+        tile_size,
+        Tile::GroundGrassTuft,
+        plant_seed,
+        PlantSprite::GrassTuft,
+    );
+    paint_plant_sprite(
+        &mut pixels,
+        width,
+        tile_size,
+        Tile::GroundFlowersYellow,
+        plant_seed + 1,
+        PlantSprite::Flowers(0),
+    );
+    paint_plant_sprite(
+        &mut pixels,
+        width,
+        tile_size,
+        Tile::GroundFlowersWhite,
+        plant_seed + 2,
+        PlantSprite::Flowers(1),
+    );
+    paint_plant_sprite(
+        &mut pixels,
+        width,
+        tile_size,
+        Tile::GroundFlowersRed,
+        plant_seed + 3,
+        PlantSprite::Flowers(2),
+    );
+    paint_plant_sprite(
+        &mut pixels,
+        width,
+        tile_size,
+        Tile::GroundFern,
+        plant_seed + 4,
+        PlantSprite::Fern,
+    );
+    paint_plant_sprite(
+        &mut pixels,
+        width,
+        tile_size,
+        Tile::GroundMushroom,
+        plant_seed + 5,
+        PlantSprite::Mushroom,
+    );
+
+    // Stylized foliage cutout holes for airy leaves
     let leaf_tiles = [
         (Tile::Leaves, 8_u32),
         (Tile::PineLeaves, 10_u32),
@@ -778,9 +1143,13 @@ pub fn create_block_texture_atlas() -> (u32, u32, Vec<u8>) {
     ];
     for (tile, salt) in leaf_tiles {
         let (col, row) = tile.coords();
+        // Organic gap clusters instead of uniform pinpricks: a low-frequency
+        // noise field decides where the canopy shows through, so holes read
+        // as sky between leaf clumps rather than moth damage.
+        let hole_noise = OpenSimplex::new(tile_seed(salt).wrapping_add(4_231));
         paint_tile_alpha(&mut pixels, width, tile_size, col, row, |x, y| {
-            let cell = (x / 2) * 37 + (y / 2) * 73 + tile_seed(salt);
-            if cell.wrapping_mul(0x9E37_79B1).is_multiple_of(29) {
+            let gap = fbm(&hole_noise, x as f64, y as f64, tile_size as f64 * 0.16);
+            if gap > 0.58 {
                 0
             } else {
                 255
@@ -788,7 +1157,8 @@ pub fn create_block_texture_atlas() -> (u32, u32, Vec<u8>) {
         });
     }
 
-    // Water & Ice alpha translucency
+    // Water alpha translucency: 215 (keeps shallows see-through while the
+    // deeper palette still reads as blue).
     let (water_col, water_row) = Tile::Water.coords();
     paint_tile_alpha(
         &mut pixels,
@@ -796,7 +1166,7 @@ pub fn create_block_texture_atlas() -> (u32, u32, Vec<u8>) {
         tile_size,
         water_col,
         water_row,
-        |_x, _y| 200,
+        |_x, _y| 215,
     );
 
     let (ice_col, ice_row) = Tile::Ice.coords();
@@ -813,9 +1183,7 @@ pub struct WaterTextureAnimation {
     frame: usize,
 }
 
-/// Advances the water tile at 8 frames per second. Updating one tile in this
-/// compact atlas is cheap, while the shared animation makes lakes ripple and
-/// waterfall faces visibly stream instead of reading as static blue blocks.
+/// Advances the water tile at 8 frames per second.
 pub fn animate_water_texture(
     time: Res<Time>,
     atlas_config: Res<super::texture_atlas::TextureAtlasConfig>,
@@ -858,7 +1226,7 @@ fn paint_water_frame(pixels: &mut [u8], phase: f32) {
         ATLAS_TILE_RESOLUTION,
         col,
         row,
-        |_x, _y| 200,
+        |_x, _y| 215,
     );
 }
 
@@ -891,9 +1259,6 @@ pub fn load_or_create_atlas(
 ) {
     let (width, height, pixels) = create_block_texture_atlas();
     let texture_handle = images.add(atlas_image(width, height, pixels.clone()));
-    // Texture-handle swaps are reliably propagated by Bevy's material asset
-    // pipeline. Sixteen compact full-atlas frames cost about 2.3 MiB and avoid
-    // a custom water shader during this voxel-material phase.
     let mut water_frames = Vec::with_capacity(16);
     water_frames.push(texture_handle.clone());
     for frame in 1..16 {
@@ -905,22 +1270,23 @@ pub fn load_or_create_atlas(
     atlas_config.water_texture_frames = water_frames.clone();
     atlas_config.opaque_material = Some(materials.add(StandardMaterial {
         base_color_texture: Some(texture_handle.clone()),
-        perceptual_roughness: 0.84,
-        reflectance: 0.14,
+        perceptual_roughness: 0.82,
+        reflectance: 0.16,
         ..default()
     }));
     atlas_config.foliage_material = Some(materials.add(StandardMaterial {
         base_color_texture: Some(texture_handle.clone()),
         alpha_mode: AlphaMode::AlphaToCoverage,
-        perceptual_roughness: 0.88,
-        reflectance: 0.10,
+        perceptual_roughness: 0.84,
+        reflectance: 0.12,
+        cull_mode: None,
         ..default()
     }));
     atlas_config.water_material = Some(materials.add(StandardMaterial {
         base_color_texture: Some(water_frames[0].clone()),
         alpha_mode: AlphaMode::Blend,
-        perceptual_roughness: 0.28,
-        reflectance: 0.30,
+        perceptual_roughness: 0.10,
+        reflectance: 0.55,
         ..default()
     }));
 
@@ -941,7 +1307,7 @@ mod tests {
         assert_eq!(height, ATLAS_TILES_PER_COLUMN * ATLAS_TILE_RESOLUTION);
         assert_eq!(pixels.len(), (width * height * 4) as usize);
         assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 0));
-        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 200));
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 215));
     }
 
     #[test]

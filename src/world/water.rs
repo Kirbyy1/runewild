@@ -1,10 +1,13 @@
 //! Lightweight cellular water flow for loaded terrain.
 //!
 //! Player-placed water blocks are stable sources. Generated rivers, lakes and
-//! oceans already occupy terrain-carved basins and remain static. Flowing cells
-//! fall vertically first, then spread a bounded number of blocks across
-//! supported terrain. Runtime flow is deliberately transient: only authored
-//! player edits belong in the world save.
+//! oceans already occupy terrain-carved basins and remain static until a
+//! player edit touches them: any procedural water cell neighbouring an edit
+//! then acts as an infinite source, so breached basins flood player-dug
+//! holes Minecraft-style. Flowing cells fall vertically first, then spread a
+//! bounded number of blocks across supported terrain. Runtime flow is
+//! deliberately transient: only authored player edits belong in the world
+//! save.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -17,8 +20,8 @@ use crate::world::{
     voxel::BlockType,
 };
 
-const FLOW_INTERVAL_SECONDS: f32 = 0.10;
-const FLOW_UPDATES_PER_TICK: usize = 128;
+const FLOW_INTERVAL_SECONDS: f32 = 0.08;
+const FLOW_UPDATES_PER_TICK: usize = 192;
 const MAX_HORIZONTAL_LEVEL: u8 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,8 +84,24 @@ impl WaterSimulation {
         self.wake_with_neighbors(coord);
     }
 
-    pub fn notify_block_changed(&mut self, coord: VoxelCoord) {
+    pub fn notify_block_changed(&mut self, world: &mut ChunkManager, coord: VoxelCoord) {
         self.wake_with_neighbors(coord);
+
+        // Generated basins are not part of the simulation, so a plain edit
+        // next to an ocean or lake would leave the hole dry forever. Promote
+        // every loaded procedural water neighbour to a stable source; cells
+        // that already carry flow state (player water) are left untouched so
+        // removing their original source still drains them.
+        for neighbor in flow_neighbors(coord) {
+            if !world.is_voxel_loaded(neighbor) {
+                continue;
+            }
+            if world.block_at(neighbor) != BlockType::Water || self.cells.contains_key(&neighbor) {
+                continue;
+            }
+            self.cells.insert(neighbor, FlowCell::SOURCE);
+            self.wake(neighbor);
+        }
     }
 
     pub fn remove_column(&mut self, column: ChunkCoord) {

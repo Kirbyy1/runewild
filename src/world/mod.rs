@@ -33,9 +33,9 @@ pub const VOXEL_SIZE_M: f32 = 1.0 / VOXELS_PER_METER as f32;
 /// 3D cave carving remains gated until its generation pass is ready for the
 /// regional terrain model.
 pub const ENABLE_CAVES: bool = false;
-/// The old decor pass creates isolated rocks, logs and bushes. Keep it gated
-/// until those shapes are authored directly for the finer block grid.
-pub const ENABLE_GROUND_DECOR: bool = false;
+/// Rocks, fallen logs and bushes are authored in one-metre art units, which
+/// map 1:1 onto the terrain grid at `VOXELS_PER_METER = 1`.
+pub const ENABLE_GROUND_DECOR: bool = true;
 
 /// Compile-time default for terrain/meshing profiling. Runtime profiling can
 /// be enabled without rebuilding with `PROFILE_WORLD=1`.

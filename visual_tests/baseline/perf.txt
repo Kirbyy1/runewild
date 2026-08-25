@@ -1,0 +1,13 @@
+view	avg_fps	settle_seconds
+overview	413.3	0.58
+forest	453.0	0.53
+tree_closeup	727.3	0.33
+mountains	363.0	0.66
+ground_detail	574.0	0.42
+water	320.0	0.75
+distant_view	534.2	0.45
+
+triangles=660252
+loaded_sections=222
+generated_columns=426
+render_distance_m=160

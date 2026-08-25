@@ -15,14 +15,26 @@ const PADDING: i32 = 24;
 const SEAM_BLEND_M: i32 = 48;
 const SIDE: i32 = CORE_CELLS + PADDING * 2 + 1;
 const CACHE_LIMIT: usize = 32;
-const THERMAL_PASSES: usize = 5;
+/// Thermal erosion tuning: full talus relaxation stairs every smooth flank
+/// into concentric benches (the "ziggurat" artifact). Two gentle passes only
+/// knock off genuine spikes and keep medium-scale ruggedness intact.
+const THERMAL_PASSES: usize = 2;
+const THERMAL_TALUS: f32 = 2.75;
 const SEA_LEVEL_M: f32 = SEA_LEVEL_METRES as f32;
 const RIVER_WATER_CORE: f32 = 0.56;
 const LAKE_WATER_CORE: f32 = 0.42;
+/// Every cell the hydrology pass carves advertises at least this much
+/// coverage. Halo edges otherwise bilinear-fade below the metre-scale wet
+/// gate while their beds stay dug out, punching dry pinholes into
+/// lakeshores and riverbanks.
+const CARVE_COVERAGE_FLOOR: f32 = 0.16;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RegionalSample {
     pub height_m: f64,
+    /// Local height gradient magnitude in metres per metre, estimated from
+    /// the same grid taps as the height bilerp (free).
+    pub gradient: f64,
     pub river: f64,
     pub valley: f64,
     pub lake: f64,
@@ -59,10 +71,18 @@ pub struct RegionalTerrain {
 }
 
 impl RegionalTerrain {
-    pub fn sample<B, R>(&self, x: i32, z: i32, base_height: B, rainfall: R) -> RegionalSample
+    pub fn sample<B, R, S>(
+        &self,
+        x: i32,
+        z: i32,
+        base_height: B,
+        rainfall: R,
+        spur: S,
+    ) -> RegionalSample
     where
         B: Fn(i32, i32) -> f64,
         R: Fn(i32, i32) -> f64,
+        S: Fn(i32, i32) -> f32,
     {
         let coord = RegionCoord {
             x: x.div_euclid(CORE_M),
@@ -75,7 +95,7 @@ impl RegionalTerrain {
                 x: coord.x,
                 z: region_z,
             };
-            let center = self.sample_region(center_coord, x, z, &base_height, &rainfall);
+            let center = self.sample_region(center_coord, x, z, &base_height, &rainfall, &spur);
             if local_x_m < SEAM_BLEND_M {
                 let neighbor = self.sample_region(
                     RegionCoord {
@@ -86,6 +106,7 @@ impl RegionalTerrain {
                     z,
                     &base_height,
                     &rainfall,
+                    &spur,
                 );
                 let t = 0.5 + 0.5 * local_x_m as f64 / SEAM_BLEND_M as f64;
                 RegionalSample::blend(neighbor, center, t)
@@ -99,6 +120,7 @@ impl RegionalTerrain {
                     z,
                     &base_height,
                     &rainfall,
+                    &spur,
                 );
                 let t = 0.5 * (local_x_m - (CORE_M - SEAM_BLEND_M)) as f64 / SEAM_BLEND_M as f64;
                 RegionalSample::blend(center, neighbor, t)
@@ -121,17 +143,19 @@ impl RegionalTerrain {
         }
     }
 
-    fn sample_region<B, R>(
+    fn sample_region<B, R, S>(
         &self,
         coord: RegionCoord,
         x: i32,
         z: i32,
         base_height: &B,
         rainfall: &R,
+        spur: &S,
     ) -> RegionalSample
     where
         B: Fn(i32, i32) -> f64,
         R: Fn(i32, i32) -> f64,
+        S: Fn(i32, i32) -> f32,
     {
         let cached = self
             .regions
@@ -140,7 +164,7 @@ impl RegionalTerrain {
             .get(&coord)
             .cloned();
         let region = cached.unwrap_or_else(|| {
-            let generated = Arc::new(MacroRegion::generate(coord, base_height, rainfall));
+            let generated = Arc::new(MacroRegion::generate(coord, base_height, rainfall, spur));
             let mut regions = self
                 .regions
                 .lock()
@@ -180,6 +204,7 @@ impl RegionalSample {
         });
         Self {
             height_m: scalar(a.height_m, b.height_m),
+            gradient: scalar(a.gradient, b.gradient),
             river: scalar(a.river, b.river),
             valley: scalar(a.valley, b.valley),
             lake: scalar(a.lake, b.lake),
@@ -194,10 +219,11 @@ impl RegionalSample {
 }
 
 impl MacroRegion {
-    fn generate<B, R>(coord: RegionCoord, base_height: &B, rainfall: &R) -> Self
+    fn generate<B, R, S>(coord: RegionCoord, base_height: &B, rainfall: &R, spur: &S) -> Self
     where
         B: Fn(i32, i32) -> f64,
         R: Fn(i32, i32) -> f64,
+        S: Fn(i32, i32) -> f32,
     {
         let side = SIDE as usize;
         let len = side * side;
@@ -307,12 +333,18 @@ impl MacroRegion {
         }
 
         let mut water_surface = vec![0.0f32; len];
+        for coverage in water_coverage.iter_mut() {
+            if *coverage > 0.0 {
+                *coverage = (*coverage).max(CARVE_COVERAGE_FLOOR);
+            }
+        }
         for i in 0..len {
             if water_surface_weight[i] <= f32::EPSILON || water_coverage[i] <= 0.0 {
                 continue;
             }
             water_surface[i] = water_surface_sum[i] / water_surface_weight[i];
         }
+
         relax_water_surfaces(&mut water_surface, &water_coverage, side);
 
         let mut water_surface_weighted = vec![0.0f32; len];
@@ -323,11 +355,32 @@ impl MacroRegion {
             }
             let surface = water_surface[i];
             // Every occupied core is carved beneath the shared surface. This
-            // prevents dry checkerboard holes after one-metre quantization.
-            let minimum_depth = 1.75 + water_coverage[i] * 1.25;
+            // prevents dry checkerboard holes after one-metre quantization,
+            // and the 2 m base keeps even halo-floored banks out of the
+            // ankle-deep fringe that reveals the voxel contour grid.
+            let minimum_depth = 2.05 + water_coverage[i];
             carved[i] = carved[i].min(surface - minimum_depth);
             water_depth[i] = (surface - carved[i]).max(0.0);
             water_surface_weighted[i] = surface * water_coverage[i];
+        }
+
+        // Mountain spur/gully structure, applied after hydrology so gullies
+        // can never rag a carved channel wall into a dry pinhole. Land only:
+        // adding spur to covered cells would lift freshly carved beds back
+        // up into ankle-deep water. Any wet-adjacent bed is still re-clamped
+        // below the relaxed surface afterwards.
+        for gz in 0..side {
+            for gx in 0..side {
+                let i = index(gx, gz, side);
+                if water_coverage[i] <= 0.0 {
+                    let wx = origin_x + gx as i32 * GRID_M;
+                    let wz = origin_z + gz as i32 * GRID_M;
+                    carved[i] += spur(wx, wz);
+                }
+                if water_coverage[i] > 0.0 {
+                    carved[i] = carved[i].min(water_surface[i] - 0.6);
+                }
+            }
         }
 
         Self {
@@ -352,6 +405,7 @@ impl MacroRegion {
         });
         RegionalSample {
             height_m: bilerp_grid(&self.height, side, x, z) as f64,
+            gradient: height_gradient(&self.height, side, x, z) as f64,
             river: bilerp_grid(&self.river, side, x, z) as f64,
             valley: bilerp_grid(&self.valley, side, x, z) as f64,
             lake: bilerp_grid(&self.lake, side, x, z) as f64,
@@ -393,7 +447,7 @@ fn thermal_erode(height: &mut [f32], side: usize) {
                         lowest = ni;
                     }
                 }
-                let talus = 2.15;
+                let talus = THERMAL_TALUS;
                 if lowest != i && drop > talus {
                     let moved = (drop - talus) * 0.17;
                     delta[i] -= moved;
@@ -494,6 +548,7 @@ fn stamp_channel(
         tangent.0 / tangent_length * bend * 0.48,
     );
     let radius = (width * 3.4).ceil() as i32;
+    let plane = center_height - depth * 0.46;
     for dz in -radius..=radius {
         for dx in -radius..=radius {
             let tx = x as i32 + dx;
@@ -523,11 +578,15 @@ fn stamp_channel(
             deposition[i] = deposition[i].max(inner_bank * floodplain * (1.0 - channel * 0.6));
             moisture[i] = moisture[i].max(channel.max(floodplain * 0.72));
             let wet = smoothstep(RIVER_WATER_CORE - 0.14, RIVER_WATER_CORE + 0.08, channel);
-            if wet > 0.0 {
-                let water_surface = center_height - depth * 0.46;
-                water_coverage[i] = water_coverage[i].max(wet);
-                water_surface_sum[i] += water_surface * wet;
-                water_surface_weight[i] += wet;
+            // The carve footprint is deliberately wider than the wet core;
+            // carrying a faint coverage halo across the whole carved channel
+            // keeps the flooded waterline glued to the banks instead of
+            // leaving dry slits where bilinear heights dip below the plane.
+            let halo = wet.max(floodplain * 0.30);
+            if halo > 0.0 {
+                water_coverage[i] = water_coverage[i].max(halo);
+                water_surface_sum[i] += plane * halo;
+                water_surface_weight[i] += halo;
             }
         }
     }
@@ -565,18 +624,37 @@ fn stamp_lake(
             carved[i] = carved[i].min(sink_height - 0.55 * strength);
             lake[i] = lake[i].max(strength);
             moisture[i] = moisture[i].max(strength);
-            let wet = smoothstep(LAKE_WATER_CORE - 0.12, LAKE_WATER_CORE + 0.08, strength);
-            if wet > 0.0 {
+            // Same carve-wider-than-water principle as channels: the halo
+            // keeps shorelines flooded up to the true bank.
+            let halo = smoothstep(LAKE_WATER_CORE - 0.12, LAKE_WATER_CORE + 0.08, strength)
+                .max(strength * 0.30);
+            if halo > 0.0 {
                 let water_surface = sink_height + 0.10;
-                water_coverage[i] = water_coverage[i].max(wet);
-                water_surface_sum[i] += water_surface * wet;
-                water_surface_weight[i] += wet;
+                water_coverage[i] = water_coverage[i].max(halo);
+                water_surface_sum[i] += water_surface * halo;
+                water_surface_weight[i] += halo;
             }
         }
     }
 }
 
 fn bilerp_grid(values: &[f32], side: usize, x: f32, z: f32) -> f32 {
+    let (a, b, c, d, tx, tz) = grid_taps(values, side, x, z);
+    let near = a + (b - a) * tx;
+    let far = c + (d - c) * tx;
+    near + (far - near) * tz
+}
+
+/// Magnitude of the local height gradient, from the same four taps the
+/// height bilerp uses. Units: metres per metre.
+fn height_gradient(values: &[f32], side: usize, x: f32, z: f32) -> f32 {
+    let (a, b, c, _d, _tx, _tz) = grid_taps(values, side, x, z);
+    let gx = (b - a) / GRID_M as f32;
+    let gz = (c - a) / GRID_M as f32;
+    (gx * gx + gz * gz).sqrt()
+}
+
+fn grid_taps(values: &[f32], side: usize, x: f32, z: f32) -> (f32, f32, f32, f32, f32, f32) {
     let x0 = x.floor().clamp(0.0, (side - 2) as f32) as usize;
     let z0 = z.floor().clamp(0.0, (side - 2) as f32) as usize;
     let tx = x - x0 as f32;
@@ -585,7 +663,7 @@ fn bilerp_grid(values: &[f32], side: usize, x: f32, z: f32) -> f32 {
     let b = values[index(x0 + 1, z0, side)];
     let c = values[index(x0, z0 + 1, side)];
     let d = values[index(x0 + 1, z0 + 1, side)];
-    (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * tz
+    (a, b, c, d, tx, tz)
 }
 
 fn index(x: usize, z: usize, side: usize) -> usize {
@@ -608,9 +686,9 @@ mod tests {
     #[test]
     fn samples_are_deterministic_and_cached() {
         let terrain = RegionalTerrain::default();
-        let first = terrain.sample(40, -19, base, |_, _| 0.7);
+        let first = terrain.sample(40, -19, base, |_, _| 0.7, |_, _| 0.0);
         let cached_after_first = terrain.cached_regions();
-        let second = terrain.sample(40, -19, base, |_, _| 0.7);
+        let second = terrain.sample(40, -19, base, |_, _| 0.7, |_, _| 0.0);
         assert_eq!(first.height_m, second.height_m);
         assert_eq!(first.river, second.river);
         assert!((1..=4).contains(&cached_after_first));
@@ -621,8 +699,8 @@ mod tests {
     fn region_boundaries_do_not_crack() {
         let terrain = RegionalTerrain::default();
         for z in (-128..128).step_by(16) {
-            let left = terrain.sample(CORE_M - 1, z, base, |_, _| 0.65);
-            let right = terrain.sample(CORE_M, z, base, |_, _| 0.65);
+            let left = terrain.sample(CORE_M - 1, z, base, |_, _| 0.65, |_, _| 0.0);
+            let right = terrain.sample(CORE_M, z, base, |_, _| 0.65, |_, _| 0.0);
             assert!(
                 (left.height_m - right.height_m).abs() < 2.5,
                 "regional seam at z={z}: {} vs {}",
@@ -640,7 +718,7 @@ mod tests {
         let mut flow_values = std::collections::HashSet::new();
         for z in (-256..256).step_by(4) {
             for x in (-256..256).step_by(4) {
-                let sample = terrain.sample(x, z, base, |_, _| 0.8);
+                let sample = terrain.sample(x, z, base, |_, _| 0.8, |_, _| 0.0);
                 wet += usize::from(sample.river > 0.2 || sample.lake > 0.2);
                 deposits += usize::from(sample.deposition > 0.2);
                 if sample.flow > 0.0 {

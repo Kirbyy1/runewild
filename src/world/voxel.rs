@@ -26,6 +26,27 @@ pub enum BlockType {
     Mud,
     Ice,
     Cactus,
+    // Ground plants: rendered as crossed cutout quads, never solid.
+    GrassTuft,
+    FlowersYellow,
+    FlowersWhite,
+    FlowersRed,
+    Fern,
+    Mushroom,
+}
+
+impl BlockType {
+    pub fn is_plant(self) -> bool {
+        matches!(
+            self,
+            BlockType::GrassTuft
+                | BlockType::FlowersYellow
+                | BlockType::FlowersWhite
+                | BlockType::FlowersRed
+                | BlockType::Fern
+                | BlockType::Mushroom
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +73,7 @@ impl BlockType {
     ];
 
     pub fn is_solid(self) -> bool {
-        !matches!(self, BlockType::Air | BlockType::Water)
+        !matches!(self, BlockType::Air | BlockType::Water) && !self.is_plant()
     }
 
     pub fn is_transparent(self) -> bool {
@@ -67,7 +88,7 @@ impl BlockType {
                 | BlockType::Cactus
                 | BlockType::Water
                 | BlockType::Ice
-        )
+        ) || self.is_plant()
     }
 
     pub fn is_translucent(self) -> bool {
@@ -158,6 +179,14 @@ impl BlockType {
                 (0.22 + v * 0.2).clamp(0.0, 1.0),
                 0.98,
             ),
+            // Ground plants render from atlas tiles as crossed cutout quads;
+            // these colors only back the rare non-textured fallback path.
+            BlockType::GrassTuft => Color::srgba(0.36, 0.62, 0.24, 1.0),
+            BlockType::FlowersYellow => Color::srgba(0.36, 0.62, 0.24, 1.0),
+            BlockType::FlowersWhite => Color::srgba(0.36, 0.62, 0.24, 1.0),
+            BlockType::FlowersRed => Color::srgba(0.36, 0.62, 0.24, 1.0),
+            BlockType::Fern => Color::srgba(0.24, 0.52, 0.22, 1.0),
+            BlockType::Mushroom => Color::srgba(0.82, 0.76, 0.66, 1.0),
         }
     }
 
