@@ -11,7 +11,9 @@ const SETTINGS_FILE: &str = "save/settings.json";
 const SETTINGS_FORMAT_VERSION: u32 = 2;
 const QUARTER_METRE_SECTION_SIZE_M: f32 = 8.0;
 
-pub const DEFAULT_RENDER_DISTANCE_SECTIONS: i32 = 5;
+/// 8 sections = 256 m: enough horizon for mountain massifs to read as
+/// silhouettes (Hytale-scale vistas) while staying streamable.
+pub const DEFAULT_RENDER_DISTANCE_SECTIONS: i32 = 8;
 pub const MIN_RENDER_DISTANCE_SECTIONS: i32 = 2;
 pub const MAX_RENDER_DISTANCE_SECTIONS: i32 = 12;
 pub const RENDER_DISTANCE_STEP: i32 = 1;

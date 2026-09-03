@@ -5,6 +5,13 @@ A first-person fantasy voxel sandbox game built with **Rust** and [Bevy 0.14](ht
 Deterministic procedural terrain, biomes, flowing water, block building and a
 sparse-sectioned infinite world — all rendered with a custom greedy mesher.
 
+The world and its textures are art-directed toward a stylized Hytale-like
+look: land-forward continents with rolling meadows, chunky hills and
+commanding mountain ranges; lush overgrown forests with big broadleaf
+canopies; and a painterly procedural resource pack — saturated sunlit
+palettes, hand-painted colour clumps, sun-rimmed foliage and detailed bark,
+stone and soil — under warm golden daylight.
+
 ## Features
 
 - Deterministic seeded voxel terrain (`u64` seed, fully reproducible)

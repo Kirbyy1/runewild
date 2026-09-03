@@ -23,7 +23,7 @@ pub enum GameState {
 
 pub fn run(visual_test: bool) {
     let mut app = App::new();
-    app.insert_resource(ClearColor(Color::srgb(0.46, 0.72, 0.92)))
+    app.insert_resource(ClearColor(Color::srgb(0.33, 0.60, 0.91)))
         .insert_resource(Msaa::Sample4)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {

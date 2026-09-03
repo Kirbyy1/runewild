@@ -229,9 +229,10 @@ impl WorldNoise {
                 self.chain_hills.get([xf / 550.0, zf / 550.0]).abs(),
             );
 
-        // Some sections of a range are higher than others.
+        // Some sections of a range are higher than others. Hytale-scale
+        // massifs: taller crests so ranges dominate the horizon.
         let band = self.chain_band.get([u / 900.0, v / 900.0]);
-        let ridge_top = 90.0 + 40.0 * band;
+        let ridge_top = 105.0 + 45.0 * band;
         let tiers = 1.0
             + 0.35 * smoothstep_range(0.45, 0.72, crest * massif)
             + 0.25 * smoothstep_range(0.72, 0.90, crest * massif);
@@ -239,10 +240,10 @@ impl WorldNoise {
 
         // Broad foot bulge inside the corridor, a rolling foothill apron
         // outside it, and a shallow moat valley beyond the apron.
-        let base_bulge = 32.0 * corridor;
+        let base_bulge = 36.0 * corridor;
         let apron_dist = (v.abs() - 600.0) / 340.0;
         let apron = (-apron_dist * apron_dist).exp()
-            * 22.0
+            * 24.0
             * (0.5 + 0.5 * (self.chain_hills.get([xf / 170.0, zf / 170.0]) * 0.5 + 0.5));
         let moat = smoothstep_range(0.95, 1.7, v.abs() / 450.0) * 16.0;
 

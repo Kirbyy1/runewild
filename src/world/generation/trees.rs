@@ -87,9 +87,9 @@ impl TreeKind {
         match self {
             TreeKind::YoungOak => TreeSpec {
                 kind: self,
-                trunk_h: 4 + v(1) % 2,
+                trunk_h: 5 + v(1) % 2,
                 thickness: 1,
-                crown_radius: 3,
+                crown_radius: 4,
                 crown_height: 4,
                 wood,
                 leaf: BlockType::Leaves,
@@ -97,12 +97,13 @@ impl TreeKind {
                 vines: false,
             },
             TreeKind::Oak => {
-                let trunk_h = 6 + v(3) % 3; // 6..8
+                // Hytale-proportioned broadleaf: broad crowns on stout trunks.
+                let trunk_h = 7 + v(3) % 4; // 7..10
                 TreeSpec {
                     kind: self,
                     trunk_h,
                     thickness: 1,
-                    crown_radius: 4 + (trunk_h - 6) / 2,
+                    crown_radius: 5 + (trunk_h - 7) / 2,
                     crown_height: 5,
                     wood,
                     leaf: BlockType::Leaves,
@@ -111,13 +112,13 @@ impl TreeKind {
                 }
             }
             TreeKind::TallOak => {
-                let trunk_h = 9 + v(5) % 4; // 9..12
+                let trunk_h = 10 + v(5) % 5; // 10..14
                 TreeSpec {
                     kind: self,
                     trunk_h,
                     thickness: 1,
                     // Canopy width always reaches at least the trunk height.
-                    crown_radius: 5 + (trunk_h - 9) / 2,
+                    crown_radius: 6 + (trunk_h - 10) / 2,
                     crown_height: 6,
                     wood,
                     leaf: BlockType::Leaves,
@@ -127,9 +128,9 @@ impl TreeKind {
             }
             TreeKind::WideOak => TreeSpec {
                 kind: self,
-                trunk_h: 7 + v(7) % 3,
+                trunk_h: 8 + v(7) % 3,
                 thickness: 2,
-                crown_radius: 6,
+                crown_radius: 8,
                 crown_height: 5,
                 wood,
                 leaf: BlockType::Leaves,
@@ -137,13 +138,13 @@ impl TreeKind {
                 vines: false,
             },
             TreeKind::Birch => {
-                let trunk_h = 8 + v(9) % 4; // 8..11
+                let trunk_h = 9 + v(9) % 4; // 9..12
                 TreeSpec {
                     kind: self,
                     trunk_h,
                     thickness: 1,
                     // Birches stay deliberately narrower than oaks.
-                    crown_radius: 3 + (trunk_h - 8) / 3,
+                    crown_radius: 4 + (trunk_h - 9) / 3,
                     crown_height: 6,
                     wood: BlockType::BirchWood,
                     leaf: BlockType::Leaves,
@@ -152,12 +153,12 @@ impl TreeKind {
                 }
             }
             TreeKind::Giant => {
-                let trunk_h = 12 + v(11) % 4; // 12..15
+                let trunk_h = 14 + v(11) % 5; // 14..18
                 TreeSpec {
                     kind: self,
                     trunk_h,
                     thickness: 3,
-                    crown_radius: 7 + (trunk_h - 12) / 2, // 7..8
+                    crown_radius: 9 + (trunk_h - 14) / 2, // 9..11
                     crown_height: 6,
                     wood: BlockType::JungleWood,
                     leaf: BlockType::JungleLeaves,
@@ -166,12 +167,12 @@ impl TreeKind {
                 }
             }
             TreeKind::JungleGiant => {
-                let trunk_h = 13 + v(29) % 4; // 13..16
+                let trunk_h = 15 + v(29) % 5; // 15..19
                 TreeSpec {
                     kind: self,
                     trunk_h,
                     thickness: 3,
-                    crown_radius: 7 + (trunk_h - 13) / 2,
+                    crown_radius: 9 + (trunk_h - 15) / 2,
                     crown_height: 6,
                     wood: BlockType::JungleWood,
                     leaf: BlockType::JungleLeaves,
@@ -179,15 +180,15 @@ impl TreeKind {
                     vines: true,
                 }
             }
-            TreeKind::PineSmall => pine(self, 5 + v(13) % 2, 2, wood),
-            TreeKind::PineMedium => pine(self, 8 + v(15) % 3, 3, wood),
-            TreeKind::PineTall => pine(self, 12 + v(17) % 4, 4, wood),
-            TreeKind::PineSnowy => pine(self, 9 + v(19) % 3, 3, wood),
+            TreeKind::PineSmall => pine(self, 6 + v(13) % 3, 3, wood),
+            TreeKind::PineMedium => pine(self, 9 + v(15) % 3, 4, wood),
+            TreeKind::PineTall => pine(self, 13 + v(17) % 4, 5, wood),
+            TreeKind::PineSnowy => pine(self, 10 + v(19) % 3, 4, wood),
             TreeKind::JungleMedium => TreeSpec {
                 kind: self,
-                trunk_h: 9 + v(21) % 3,
+                trunk_h: 10 + v(21) % 3,
                 thickness: 1,
-                crown_radius: 5,
+                crown_radius: 6,
                 crown_height: 5,
                 wood: BlockType::JungleWood,
                 leaf: BlockType::JungleLeaves,
@@ -196,9 +197,9 @@ impl TreeKind {
             },
             TreeKind::Palm => TreeSpec {
                 kind: self,
-                trunk_h: 8 + v(23) % 3,
+                trunk_h: 9 + v(23) % 3,
                 thickness: 1,
-                crown_radius: 4,
+                crown_radius: 5,
                 crown_height: 1,
                 wood: BlockType::JungleWood,
                 leaf: BlockType::PalmLeaves,
@@ -209,7 +210,7 @@ impl TreeKind {
                 kind: self,
                 trunk_h: 6 + v(25) % 3,
                 thickness: 1,
-                crown_radius: 4,
+                crown_radius: 5,
                 crown_height: 2,
                 wood,
                 leaf: BlockType::AutumnLeaves,
@@ -218,9 +219,9 @@ impl TreeKind {
             },
             TreeKind::SwampWillow => TreeSpec {
                 kind: self,
-                trunk_h: 7 + v(27) % 3,
+                trunk_h: 8 + v(27) % 3,
                 thickness: 2,
-                crown_radius: 5,
+                crown_radius: 6,
                 crown_height: 5,
                 wood,
                 leaf: BlockType::Leaves,
