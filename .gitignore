@@ -14,3 +14,5 @@ visual_tests/session_save.json
 visual_tests/session_settings.json
 visual_tests/run.log
 visual_tests/perf.txt
+/.arena/
+/.cache/
