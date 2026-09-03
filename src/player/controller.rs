@@ -96,8 +96,8 @@ pub fn setup_player(mut commands: Commands, save: Res<SaveGame>, settings: Res<W
                     ..default()
                 },
                 FogSettings {
-                    color: Color::srgb(0.50, 0.73, 0.92),
-                    directional_light_color: Color::srgba(1.0, 0.88, 0.66, 0.22),
+                    color: Color::srgb(0.40, 0.65, 0.92),
+                    directional_light_color: Color::srgba(1.0, 0.88, 0.66, 0.26),
                     directional_light_exponent: 20.0,
                     falloff: FogFalloff::Linear {
                         start: render_distance_m * 0.85,

@@ -25,15 +25,17 @@ const CLOUD_WIND_M_S: Vec2 = Vec2::new(1.15, -0.5);
 pub(crate) struct CloudLayer;
 
 pub fn setup_atmosphere(mut commands: Commands) {
+    // Hytale-style daylight: a soft cool sky fill under a warm golden sun so
+    // shaded foliage keeps colour instead of collapsing to grey.
     commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.78, 0.85, 1.0),
-        brightness: 400.0,
+        color: Color::srgb(0.72, 0.82, 1.0),
+        brightness: 620.0,
     });
 
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
-            color: Color::srgb(1.0, 0.96, 0.90),
-            illuminance: 32_000.0,
+            color: Color::srgb(1.0, 0.93, 0.80),
+            illuminance: 38_000.0,
             shadows_enabled: true,
             ..default()
         },

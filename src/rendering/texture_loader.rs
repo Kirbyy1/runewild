@@ -82,64 +82,126 @@ fn fbm(noise: &OpenSimplex, x: f64, y: f64, scale: f64) -> f64 {
     (a + b) / 1.5
 }
 
-fn grass_top_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
-    let noise = OpenSimplex::new(seed);
-    let blade_noise = OpenSimplex::new(seed.wrapping_add(1));
-    let flower_noise = OpenSimplex::new(seed.wrapping_add(107));
-    // Desaturated a touch: full-saturation lawns read as toy plastic under
-    // bright sun; the eye expects more yellow in the midtones.
-    let base_dark: Rgb = (66, 134, 50);
-    let base_mid: Rgb = (92, 164, 62);
-    let base_light: Rgb = (126, 196, 88);
+// ---------------------------------------------------------------------------
+// Painterly value-noise toolkit (Hytale-style resource pack)
+// ---------------------------------------------------------------------------
+
+/// Deterministic per-lattice-point value in [0, 1).
+fn lattice(x: i32, y: i32, seed: u32) -> f64 {
+    let mut n = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (y as u64).wrapping_mul(0x517C_C1B7_2722_0A95)
+        ^ (seed as u64).wrapping_mul(0x6C62_272E_07BB_0142);
+    n ^= n >> 30;
+    n = n.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    n ^= n >> 27;
+    n = n.wrapping_mul(0x94D0_49BB_1331_11EB);
+    n ^= n >> 31;
+    n as f64 / u64::MAX as f64
+}
+
+/// Smooth value noise in [-1, 1]; the painterly workhorse behind clumps,
+/// facets, bark ridges and blade strokes.
+fn vnoise(x: f64, y: f64, seed: u32) -> f64 {
+    let xi = x.floor() as i32;
+    let yi = y.floor() as i32;
+    let xf = x - x.floor();
+    let yf = y - y.floor();
+    let u = xf * xf * (3.0 - 2.0 * xf);
+    let v = yf * yf * (3.0 - 2.0 * yf);
+    let a = lattice(xi, yi, seed);
+    let b = lattice(xi + 1, yi, seed);
+    let c = lattice(xi, yi + 1, seed);
+    let d = lattice(xi + 1, yi + 1, seed);
+    let top = a + (b - a) * u;
+    let bot = c + (d - c) * u;
+    (top + (bot - top) * v) * 2.0 - 1.0
+}
+
+/// Two-octave value noise in [-1, 1].
+fn vnoise2(x: f64, y: f64, seed: u32) -> f64 {
+    (vnoise(x, y, seed)
+        + 0.5 * vnoise(x * 2.63 + 13.7, y * 2.63 + 7.31, seed.wrapping_add(0x5EED)))
+        / 1.5
+}
+
+/// Quantize a [0,1] ramp parameter into `steps` paint bands, blended half
+/// back toward the smooth value so surfaces read as hand-painted clumps
+/// with a hint of gradient instead of smooth plastic or hard poster bands.
+fn paint_step(t: f32, steps: f32) -> f32 {
+    let q = (t * steps).round() / steps;
+    (q + t) * 0.5
+}
+
+fn grass_top_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
+    // Hytale-style meadow lawn: saturated yellow-green built from painted
+    // clumps, anisotropic blade strokes and sunlit tips.
+    let base_dark: Rgb = (54, 108, 36);
+    let base_mid: Rgb = (92, 152, 46);
+    let base_light: Rgb = (136, 194, 72);
+    let base_sun: Rgb = (176, 222, 106);
     move |x, y| {
-        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.26);
-        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+        let fx = x as f64;
+        let fy = y as f64;
+        let clump = vnoise2(fx / 7.0, fy / 7.0, seed) * 0.5 + 0.5;
+        let t = paint_step(clump as f32, 4.0);
         let mut c = if t < 0.5 {
             lerp_color(base_dark, base_mid, t * 2.0)
+        } else if t < 0.8 {
+            lerp_color(base_mid, base_light, (t - 0.5) / 0.3)
         } else {
-            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+            lerp_color(base_light, base_sun, (t - 0.8) / 0.2)
         };
-        let blade = blade_noise.get([x as f64 / 2.2, y as f64 / 7.5]);
-        if blade > 0.48 {
-            c = shade(c, 1.08);
-        } else if blade < -0.52 {
-            c = shade(c, 0.88);
+        // Vertical blade strokes: sunlit tips and shadowed roots.
+        let blade = vnoise(fx / 1.7, fy / 4.6, seed.wrapping_add(1));
+        if blade > 0.42 {
+            c = shade(c, 1.12);
+        } else if blade < -0.46 {
+            c = shade(c, 0.84);
         }
-        // Rare tiny meadow flower flecks
-        let flower = flower_noise.get([x as f64 / 1.5, y as f64 / 1.5]);
+        // Dark soil pockets where the lawn thins.
+        let soil = vnoise(fx / 3.4, fy / 3.4, seed.wrapping_add(2));
+        if soil > 0.74 {
+            c = lerp_color(c, (86, 62, 40), 0.55);
+        }
+        // Rare tiny meadow flower flecks.
+        let flower = vnoise(fx / 1.3 + 71.0, fy / 1.3, seed.wrapping_add(107));
         if flower > 0.90 {
-            c = (248, 236, 140);
-        } else if flower < -0.92 {
-            c = (250, 252, 255);
+            c = (246, 226, 96);
+        } else if flower < -0.93 {
+            c = (250, 250, 252);
         }
         c
     }
 }
 
-fn dirt_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
-    let noise = OpenSimplex::new(seed);
-    let pebble_noise = OpenSimplex::new(seed.wrapping_add(2));
-    let crumb_noise = OpenSimplex::new(seed.wrapping_add(77));
-    let base_dark: Rgb = (102, 68, 42);
-    let base_mid: Rgb = (132, 92, 58);
-    let base_light: Rgb = (156, 114, 76);
+fn dirt_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
+    // Rich warm soil with painted clumps, rounded pebbles and crumb speckle.
+    let base_dark: Rgb = (86, 56, 34);
+    let base_mid: Rgb = (120, 84, 54);
+    let base_light: Rgb = (152, 114, 78);
     move |x, y| {
-        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.28);
-        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+        let fx = x as f64;
+        let fy = y as f64;
+        let clump = vnoise2(fx / 6.0, fy / 6.0, seed) * 0.5 + 0.5;
+        let t = paint_step(clump as f32, 4.0);
         let mut c = if t < 0.5 {
             lerp_color(base_dark, base_mid, t * 2.0)
         } else {
             lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
         };
-        let pebble = pebble_noise.get([x as f64 / 4.5, y as f64 / 4.5]);
-        if pebble > 0.60 {
-            c = (168, 138, 102); // Rounded gravel pebble
-        } else if pebble < -0.62 {
-            c = shade(c, 0.72); // Soil pocket shadow
+        // Rounded pebbles and soil pockets.
+        let pebble = vnoise(fx / 3.6, fy / 3.6, seed.wrapping_add(2));
+        if pebble > 0.58 {
+            c = lerp_color(c, (172, 142, 106), 0.8);
+        } else if pebble < -0.60 {
+            c = shade(c, 0.72);
         }
-        let crumb = crumb_noise.get([x as f64 / 1.8, y as f64 / 1.8]);
-        if crumb > 0.55 {
-            c = shade(c, 1.08);
+        // Crumb speckle keeps large dug faces alive.
+        let crumb = vnoise(fx / 1.6, fy / 1.6, seed.wrapping_add(77));
+        if crumb > 0.52 {
+            c = shade(c, 1.10);
+        } else if crumb < -0.55 {
+            c = shade(c, 0.90);
         }
         c
     }
@@ -149,80 +211,96 @@ fn grass_side_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let mut grass = grass_top_tile(size, seed);
     let mut dirt = dirt_tile(size, seed.wrapping_add(3));
     let fringe_noise = OpenSimplex::new(seed.wrapping_add(101));
-    let base_band = (size as f32 * 0.34) as i32;
+    let blade_noise = OpenSimplex::new(seed.wrapping_add(103));
+    let base_band = (size as f32 * 0.36) as i32;
     move |x, y| {
-        let drop = (fringe_noise.get([x as f64 / 3.0, 0.0]) * 4.2).round() as i32;
-        let blade_tip = if (x % 3 == 0) && drop > 0 { 2 } else { 0 };
-        let grass_edge = base_band + drop + blade_tip;
+        let drop = (fringe_noise.get([x as f64 / 3.0, 0.0]) * 5.0).round() as i32;
+        // Individual overhanging blades: narrow columns hang a few px lower
+        // so the lawn edge reads as living turf, not a painted stripe.
+        let blade = if blade_noise.get([x as f64 / 1.4, 3.0]) > 0.15 {
+            3
+        } else {
+            0
+        };
+        let grass_edge = base_band + drop + blade;
         if (y as i32) < grass_edge {
             let mut g = grass(x, y);
-            if (y as i32) == grass_edge - 1 {
-                g = shade(g, 0.88); // Shadow on underside of grass blades
+            if (y as i32) >= grass_edge - 2 {
+                g = shade(g, 0.90); // Underside shadow of the overhang
             }
             g
         } else if (y as i32) < grass_edge + 2 {
             let t = ((y as i32) - grass_edge) as f32 / 2.0;
             lerp_color(grass(x, y), dirt(x, y), t)
+        } else if (y as i32) < grass_edge + 5 {
+            shade(dirt(x, y), 0.82) // Damp topsoil seam under the roots
         } else {
             dirt(x, y)
         }
     }
 }
 
-fn stone_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
-    let noise = OpenSimplex::new(seed);
-    let crack_noise = OpenSimplex::new(seed.wrapping_add(4));
-    let speckle_noise = OpenSimplex::new(seed.wrapping_add(91));
-    let base_dark: Rgb = (128, 134, 142);
-    let base_mid: Rgb = (154, 160, 168);
-    let base_light: Rgb = (182, 188, 196);
+fn stone_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
+    // Hytale-style rock: cool blue-grey rounded facets with per-facet paint
+    // bands, mineral speckle and soft crevices between facets.
+    let base_dark: Rgb = (100, 106, 118);
+    let base_mid: Rgb = (130, 136, 148);
+    let base_light: Rgb = (162, 168, 180);
+    let facet_light: Rgb = (190, 196, 208);
     move |x, y| {
-        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.22);
-        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
-        let mut c = if t < 0.5 {
-            lerp_color(base_dark, base_mid, t * 2.0)
+        let fx = x as f64;
+        let fy = y as f64;
+        let facet = vnoise(fx / 8.5, fy / 8.5, seed) * 0.5 + 0.5;
+        let t = paint_step(facet as f32, 4.0);
+        let mut c = if t < 0.4 {
+            lerp_color(base_dark, base_mid, t / 0.4)
+        } else if t < 0.75 {
+            lerp_color(base_mid, base_light, (t - 0.4) / 0.35)
         } else {
-            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+            lerp_color(base_light, facet_light, (t - 0.75) / 0.25)
         };
-        let crack = crack_noise.get([x as f64 / 6.0, y as f64 / 6.0]).abs();
-        // Softer cracks: near-black wormy lines on shadowed faces turned
-        // every cliff riser into high-contrast stripes.
-        if crack < 0.026 {
-            c = shade(c, 0.74);
-        } else if crack < 0.055 {
+        // Fine mineral speckle.
+        let speckle = vnoise(fx / 1.8, fy / 1.8, seed.wrapping_add(91));
+        if speckle > 0.62 {
+            c = shade(c, 1.10);
+        } else if speckle < -0.66 {
             c = shade(c, 0.88);
         }
-        let speckle = speckle_noise.get([x as f64 / 2.0, y as f64 / 2.0]);
-        if speckle > 0.65 {
-            c = (198, 204, 214);
+        // Soft crevices between facets; kept gentle so cliff risers do not
+        // stripe into high-contrast bands.
+        let crack = vnoise2(fx / 5.0, fy / 5.0, seed.wrapping_add(4)).abs();
+        if crack < 0.05 {
+            c = shade(c, 0.76);
+        } else if crack < 0.10 {
+            c = shade(c, 0.90);
         }
         c
     }
 }
 
-fn sand_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
-    let noise = OpenSimplex::new(seed);
-    let ripple_noise = OpenSimplex::new(seed.wrapping_add(5));
-    let grain_noise = OpenSimplex::new(seed.wrapping_add(19));
-    let base_dark: Rgb = (218, 186, 126);
-    let base_mid: Rgb = (238, 208, 148);
-    let base_light: Rgb = (252, 226, 172);
+fn sand_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
+    // Warm honey sand with wind ripples that waver instead of striping.
+    let base_dark: Rgb = (204, 170, 110);
+    let base_mid: Rgb = (230, 200, 140);
+    let base_light: Rgb = (248, 226, 172);
     move |x, y| {
-        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.32);
-        let ripple = ((x as f32 * 0.35 + (y as f32 * 0.15)).sin() * 0.5 + 0.5) * 0.22;
-        let t = (n as f32 * 0.4 + 0.4 + ripple).clamp(0.0, 1.0);
+        let fx = x as f64;
+        let fy = y as f64;
+        let dune = vnoise2(fx / 9.0, fy / 9.0, seed) * 0.5 + 0.5;
+        let wave = (fy / 4.0 + vnoise(fx / 6.0, fy / 14.0, seed.wrapping_add(5)) * 2.0).sin()
+            * 0.5
+            + 0.5;
+        let t = paint_step((dune * 0.6 + wave * 0.4) as f32, 4.0);
         let mut c = if t < 0.5 {
             lerp_color(base_dark, base_mid, t * 2.0)
         } else {
             lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
         };
-        let ripple_wave = ripple_noise.get([x as f64 / 7.0, y as f64 / 7.0]);
-        if ripple_wave > 0.55 {
-            c = shade(c, 1.07);
-        }
-        let grain = grain_noise.get([x as f64 / 1.5, y as f64 / 1.5]);
-        if grain > 0.72 {
-            c = (255, 244, 210);
+        let grain = vnoise(fx / 1.4, fy / 1.4, seed.wrapping_add(19));
+        if grain > 0.70 {
+            c = (255, 242, 204);
+        } else if grain < -0.72 {
+            c = shade(c, 0.90);
         }
         c
     }
@@ -230,10 +308,10 @@ fn sand_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn wood_top_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let ring_noise = OpenSimplex::new(seed.wrapping_add(6));
-    let bark_outer: Rgb = (82, 54, 32);
-    let base_dark: Rgb = (142, 98, 60);
-    let base_mid: Rgb = (178, 132, 84);
-    let base_light: Rgb = (204, 156, 104);
+    let bark_outer: Rgb = (70, 46, 28);
+    let base_dark: Rgb = (128, 88, 52);
+    let base_mid: Rgb = (168, 124, 78);
+    let base_light: Rgb = (198, 152, 100);
     let center = size as f32 / 2.0;
     move |x, y| {
         let dx = x as f32 - center;
@@ -257,49 +335,61 @@ fn wood_top_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 }
 
 fn wood_side_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
-    let bark_noise = OpenSimplex::new(seed.wrapping_add(7));
-    let furrow_noise = OpenSimplex::new(seed.wrapping_add(27));
-    let base_dark: Rgb = (72, 46, 28);
-    let base_mid: Rgb = (108, 74, 46);
-    let base_light: Rgb = (142, 100, 64);
+    // Chunky bark: wobbled vertical ridges with deep furrows and sunlit
+    // ridge crests, so trunks read sculpted instead of striped.
+    let base_dark: Rgb = (62, 42, 26);
+    let base_mid: Rgb = (102, 70, 44);
+    let base_light: Rgb = (136, 98, 64);
+    let ridge: Rgb = (158, 118, 80);
     move |x, y| {
-        let groove = ((x as f64 / 3.8).sin() * 0.5 + 0.5) as f32;
-        let n = bark_noise.get([x as f64 / 2.8, y as f64 / 12.0]) as f32 * 0.5 + 0.5;
-        let furrow = furrow_noise.get([x as f64 / 5.0, y as f64 / 16.0]);
-        let t = (groove * 0.60 + n * 0.40).clamp(0.0, 1.0);
-        let mut c = if t < 0.5 {
-            lerp_color(base_dark, base_mid, t * 2.0)
+        let fx = x as f64;
+        let fy = y as f64;
+        let ridge_f = (fx / 3.4 + vnoise(fy / 7.0, fx / 9.0, seed.wrapping_add(27)) * 1.4)
+            .sin() as f32;
+        let streak = (vnoise(fx / 2.2, fy / 11.0, seed) * 0.5 + 0.5) as f32;
+        let t = paint_step((ridge_f * 0.5 + 0.5) * 0.55 + streak * 0.45, 4.0);
+        let mut c = if t < 0.35 {
+            lerp_color(base_dark, base_mid, t / 0.35)
+        } else if t < 0.70 {
+            lerp_color(base_mid, base_light, (t - 0.35) / 0.35)
         } else {
-            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+            lerp_color(base_light, ridge, (t - 0.70) / 0.30)
         };
-        if furrow > 0.52 {
-            c = shade(c, 1.12);
-        } else if furrow < -0.52 {
-            c = shade(c, 0.80);
+        if ridge_f < -0.72 {
+            c = shade(c, 0.74); // Deep furrow shadow
         }
         c
     }
 }
 
-fn leaves_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
-    let noise = OpenSimplex::new(seed);
-    let clump_noise = OpenSimplex::new(seed.wrapping_add(8));
-    let leaf_light: Rgb = (88, 192, 58);
-    let leaf_mid: Rgb = (54, 150, 42);
-    let leaf_dark: Rgb = (34, 102, 30);
+fn leaves_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
+    // Hytale canopy: grouped leaf clumps with sunlit upper rims and dark
+    // seams between clumps, so crowns read as sculpted foliage masses.
+    let leaf_dark: Rgb = (24, 84, 26);
+    let leaf_mid: Rgb = (46, 122, 34);
+    let leaf_light: Rgb = (84, 166, 50);
+    let leaf_sun: Rgb = (128, 200, 74);
     move |x, y| {
-        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.22);
-        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
-        let mut c = if t < 0.5 {
-            lerp_color(leaf_dark, leaf_mid, t * 2.0)
+        let fx = x as f64;
+        let fy = y as f64;
+        let clump = vnoise(fx / 4.2, fy / 4.2, seed) * 0.5 + 0.5;
+        let below = vnoise(fx / 4.2, (y as f64 + 1.5) / 4.2, seed) * 0.5 + 0.5;
+        let t = paint_step(clump as f32, 4.0);
+        let mut c = if t < 0.35 {
+            lerp_color(leaf_dark, leaf_mid, t / 0.35)
+        } else if t < 0.70 {
+            lerp_color(leaf_mid, leaf_light, (t - 0.35) / 0.35)
         } else {
-            lerp_color(leaf_mid, leaf_light, (t - 0.5) * 2.0)
+            lerp_color(leaf_light, leaf_sun, (t - 0.70) / 0.30)
         };
-        let clump = clump_noise.get([x as f64 / 3.8, y as f64 / 3.8]);
-        if clump > 0.48 {
+        // Upper rim of each clump catches the sun.
+        if clump - below > 0.16 {
             c = shade(c, 1.18);
-        } else if clump < -0.52 {
-            c = shade(c, 0.78);
+        }
+        // Dark seams between clumps give the canopy depth.
+        let seam = vnoise2(fx / 2.4, fy / 2.4, seed.wrapping_add(8)).abs();
+        if seam < 0.07 {
+            c = shade(c, 0.72);
         }
         c
     }
@@ -311,11 +401,11 @@ fn water_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn water_tile_frame(size: u32, seed: u32, phase: f32) -> impl FnMut(u32, u32) -> Rgb {
     let wave_noise = OpenSimplex::new(seed.wrapping_add(9));
-    // Deeper, less sky-coloured palette: water should read as blue even
-    // where it reflects a bright horizon.
-    let base_deep: Rgb = (14, 84, 148);
-    let base_mid: Rgb = (28, 124, 192);
-    let base_light: Rgb = (54, 164, 220);
+    // Saturated lagoon palette: water reads vivid blue-teal even where it
+    // reflects a bright horizon (blue always stays the dominant channel).
+    let base_deep: Rgb = (10, 74, 142);
+    let base_mid: Rgb = (24, 116, 190);
+    let base_light: Rgb = (58, 170, 226);
     move |x, y| {
         let flowing_y = (y as f32 + phase) % size as f32;
         let n = fbm(
@@ -406,8 +496,8 @@ fn snow_side_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 fn moss_stone_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let mut stone = stone_tile(size, seed);
     let moss = OpenSimplex::new(seed.wrapping_add(23));
-    let moss_light: Rgb = (104, 186, 68);
-    let moss_dark: Rgb = (58, 124, 44);
+    let moss_light: Rgb = (98, 192, 58);
+    let moss_dark: Rgb = (50, 122, 38);
     move |x, y| {
         let rock = stone(x, y);
         let patch = moss.get([x as f64 / 10.0, y as f64 / 8.0]);
@@ -423,13 +513,18 @@ fn moss_stone_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
 
 fn birch_side_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let grain = OpenSimplex::new(seed);
-    let bark_base: Rgb = (238, 236, 226);
-    let bark_light: Rgb = (252, 250, 244);
-    let lenticel_color: Rgb = (42, 38, 34);
+    let bark_base: Rgb = (236, 232, 220);
+    let bark_light: Rgb = (252, 250, 242);
+    let lenticel_color: Rgb = (40, 36, 32);
     let lenticel_edge: Rgb = (92, 84, 76);
     move |x, y| {
         let n = grain.get([x as f64 / 8.0, y as f64 / 16.0]) as f32;
         let mut c = lerp_color(bark_base, bark_light, n * 0.5 + 0.5);
+        // Soft vertical grey streaks keep the paper bark from reading flat.
+        let streak = vnoise(x as f64 / 2.6, y as f64 / 9.0, seed.wrapping_add(7));
+        if streak > 0.55 {
+            c = lerp_color(c, (196, 192, 180), 0.35);
+        }
         let notch_y = y % 10;
         let notch_x = (x + (y / 10) * 11) % 13;
         if notch_y == 0 && notch_x < 5 {
@@ -441,14 +536,19 @@ fn birch_side_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     }
 }
 
-fn pine_leaves_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
-    let needles = OpenSimplex::new(seed);
-    let base_dark: Rgb = (28, 92, 60);
-    let base_mid: Rgb = (46, 136, 88);
-    let base_light: Rgb = (72, 178, 116);
+fn pine_leaves_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
+    // Spruce boughs: horizontal tier banding over deep blue-green needles.
+    let base_dark: Rgb = (16, 68, 46);
+    let base_mid: Rgb = (34, 106, 72);
+    let base_light: Rgb = (62, 148, 96);
     move |x, y| {
-        let n = fbm(&needles, x as f64, y as f64, size as f64 * 0.20);
-        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+        let fx = x as f64;
+        let fy = y as f64;
+        let bough = (fy / 3.2 + vnoise(fx / 5.0, fy / 9.0, seed.wrapping_add(3)) * 1.6).sin()
+            * 0.5
+            + 0.5;
+        let needle = vnoise2(fx / 2.0, fy / 2.0, seed) * 0.5 + 0.5;
+        let t = paint_step((bough * 0.5 + needle * 0.5) as f32, 4.0);
         if t < 0.5 {
             lerp_color(base_dark, base_mid, t * 2.0)
         } else {
@@ -489,31 +589,45 @@ fn jungle_wood_side_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     }
 }
 
-fn jungle_leaves_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
-    let noise = OpenSimplex::new(seed);
-    let base_dark: Rgb = (32, 128, 46);
-    let base_mid: Rgb = (58, 178, 64);
-    let base_light: Rgb = (88, 218, 82);
+fn jungle_leaves_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
+    // Vivid rainforest foliage: big glossy clumps with bright sun rims.
+    let base_dark: Rgb = (18, 104, 34);
+    let base_mid: Rgb = (42, 152, 50);
+    let base_light: Rgb = (84, 204, 72);
+    let base_sun: Rgb = (136, 232, 98);
     move |x, y| {
-        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.24);
-        let t = (n as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
-        if t < 0.5 {
-            lerp_color(base_dark, base_mid, t * 2.0)
+        let fx = x as f64;
+        let fy = y as f64;
+        let clump = vnoise(fx / 4.6, fy / 4.6, seed) * 0.5 + 0.5;
+        let below = vnoise(fx / 4.6, (y as f64 + 1.5) / 4.6, seed) * 0.5 + 0.5;
+        let t = paint_step(clump as f32, 4.0);
+        let mut c = if t < 0.35 {
+            lerp_color(base_dark, base_mid, t / 0.35)
+        } else if t < 0.70 {
+            lerp_color(base_mid, base_light, (t - 0.35) / 0.35)
         } else {
-            lerp_color(base_mid, base_light, (t - 0.5) * 2.0)
+            lerp_color(base_light, base_sun, (t - 0.70) / 0.30)
+        };
+        if clump - below > 0.16 {
+            c = shade(c, 1.16);
         }
+        let seam = vnoise2(fx / 2.6, fy / 2.6, seed.wrapping_add(8)).abs();
+        if seam < 0.07 {
+            c = shade(c, 0.74);
+        }
+        c
     }
 }
 
-fn autumn_leaves_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
-    let noise = OpenSimplex::new(seed);
+fn autumn_leaves_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let color_noise = OpenSimplex::new(seed.wrapping_add(53));
-    let amber: Rgb = (236, 138, 32);
-    let crimson: Rgb = (214, 52, 24);
-    let gold: Rgb = (252, 196, 44);
+    let amber: Rgb = (226, 128, 28);
+    let crimson: Rgb = (196, 48, 26);
+    let gold: Rgb = (246, 186, 44);
     move |x, y| {
-        let n = fbm(&noise, x as f64, y as f64, size as f64 * 0.22);
-        let cn = color_noise.get([x as f64 / 10.0, y as f64 / 10.0]);
+        let fx = x as f64;
+        let fy = y as f64;
+        let cn = color_noise.get([fx / 10.0, fy / 10.0]);
         let base = if cn > 0.18 {
             gold
         } else if cn < -0.18 {
@@ -521,19 +635,33 @@ fn autumn_leaves_tile(size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
         } else {
             amber
         };
-        let variation = n as f32 * 0.25 + 0.88;
-        shade(base, variation)
+        // Painted clump shading with sunlit crests.
+        let clump = vnoise(fx / 3.8, fy / 3.8, seed) * 0.5 + 0.5;
+        let t = paint_step(clump as f32, 3.0);
+        let mut c = shade(base, 0.76 + t * 0.5);
+        let seam = vnoise2(fx / 2.2, fy / 2.2, seed.wrapping_add(8)).abs();
+        if seam < 0.07 {
+            c = shade(c, 0.75);
+        }
+        c
     }
 }
 
 fn palm_leaves_tile(_size: u32, seed: u32) -> impl FnMut(u32, u32) -> Rgb {
     let frond_noise = OpenSimplex::new(seed);
-    let base_dark: Rgb = (38, 114, 46);
-    let base_light: Rgb = (78, 176, 68);
+    let base_dark: Rgb = (30, 104, 40);
+    let base_light: Rgb = (86, 186, 72);
     move |x, y| {
-        let frond = ((x as f64 * 1.6 + y as f64 * 0.6).sin() * 0.5 + 0.5) as f32;
-        let n = frond_noise.get([x as f64 / 7.0, y as f64 / 7.0]) as f32 * 0.5 + 0.5;
-        lerp_color(base_dark, base_light, frond * 0.65 + n * 0.35)
+        let fx = x as f64;
+        let fy = y as f64;
+        let frond = ((fx * 1.6 + fy * 0.6).sin() * 0.5 + 0.5) as f32;
+        let n = frond_noise.get([fx / 7.0, fy / 7.0]) as f32 * 0.5 + 0.5;
+        let mut c = lerp_color(base_dark, base_light, frond * 0.65 + n * 0.35);
+        // Leaflet notches along each frond.
+        if ((fx * 1.6 + fy * 0.6) * 3.0).sin() > 0.86 {
+            c = shade(c, 0.80);
+        }
+        c
     }
 }
 

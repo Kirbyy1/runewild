@@ -94,14 +94,16 @@ pub struct TerrainConfig {
 impl Default for TerrainConfig {
     fn default() -> Self {
         Self {
-            plains_relief_m: 0.8,
-            hills_relief_m: 5.4,
-            plateau_relief_m: 5.0,
-            foothill_height_m: 16.0,
+            // Hytale-style landmass: broad rolling meadows with real
+            // vertical presence, chunky hills and commanding ranges.
+            plains_relief_m: 1.6,
+            hills_relief_m: 9.5,
+            plateau_relief_m: 7.5,
+            foothill_height_m: 22.0,
             // Compensates the coarser 1 m mountain contour step, which no
             // longer grants peaks their old half-metre snap-ups. Tall enough
             // that flanks read as cliff-and-scare instead of terraced lawn.
-            mountain_height_m: 118.0,
+            mountain_height_m: 140.0,
             detail_strength: 1.0,
             plain_contour_m: 1.0,
             hill_contour_m: 0.5,
@@ -265,18 +267,21 @@ impl TerrainGenerator {
         // as genuinely deep sea, while the landward anchor (c >= 0.02) and
         // therefore the coastline itself stay put. The abyssal tier plus
         // seabed relief give far water real basins and ridges.
+        // Wider continents: the shelf climbs out of the surf earlier so the
+        // world reads as generous landmasses ringed by beaches, not sparse
+        // islands in an ocean (Hytale's Orbis is land-forward).
         let continental_base = if c < -0.55 {
             -12.0 + smoothstep(-1.0, -0.55, c) * 17.0
         } else if c < -0.42 {
             5.0
         } else if c < -0.18 {
-            5.0 + smoothstep(-0.42, -0.18, c) * 7.0
+            5.0 + smoothstep(-0.42, -0.18, c) * 10.0
         } else if c < 0.02 {
-            12.0 + smoothstep(-0.18, 0.02, c) * 9.0
+            15.0 + smoothstep(-0.18, 0.02, c) * 10.0
         } else if c < 0.50 {
-            22.5 + smoothstep(0.02, 0.50, c) * 8.5
+            25.0 + smoothstep(0.02, 0.50, c) * 8.0
         } else {
-            31.0 + smoothstep(0.50, 1.0, c) * 9.0
+            33.0 + smoothstep(0.50, 1.0, c) * 9.0
         };
 
         // Each region owns a distinct height profile. Continuous weights make
@@ -713,23 +718,25 @@ impl TerrainGenerator {
         d *= 1.0 - 0.55 * smoothstep(0.55, 0.80, clearing);
 
         // Biome floors/caps create distinct ecosystems from the same field.
+        // Lush, overgrown biomes: forests keep a high vegetation floor so
+        // canopies close overhead, while open biomes stay genuinely open.
         let (floor, cap) = match biome {
-            Biome::Rainforest => (0.55, 1.00),
-            Biome::DenseForest => (0.48, 0.98),
-            Biome::Forest | Biome::AutumnForest => (0.42, 0.92),
-            Biome::Taiga => (0.38, 0.90),
-            Biome::SnowyForest => (0.34, 0.85),
-            Biome::Swamp => (0.30, 0.72),
-            Biome::Meadow => (0.08, 0.46),
-            Biome::Plains => (0.02, 0.30),
-            Biome::Savanna => (0.04, 0.36),
-            Biome::TropicalBeach => (0.18, 0.56),
+            Biome::Rainforest => (0.62, 1.00),
+            Biome::DenseForest => (0.58, 0.98),
+            Biome::Forest | Biome::AutumnForest => (0.52, 0.94),
+            Biome::Taiga => (0.45, 0.90),
+            Biome::SnowyForest => (0.40, 0.85),
+            Biome::Swamp => (0.34, 0.72),
+            Biome::Meadow => (0.12, 0.46),
+            Biome::Plains => (0.05, 0.30),
+            Biome::Savanna => (0.08, 0.36),
+            Biome::TropicalBeach => (0.25, 0.56),
             Biome::Beach => (0.04, 0.20),
             Biome::Desert => (0.02, 0.20),
             Biome::Badlands => (0.01, 0.14),
             Biome::Mountains => (0.04, 0.40),
             Biome::Tundra => (0.03, 0.24),
-            _ => (0.10, 0.60),
+            _ => (0.12, 0.60),
         };
         d = floor + cap * d.clamp(0.0, 1.0);
 
@@ -1381,9 +1388,9 @@ impl TerrainGenerator {
         let log_p = 0.005 + 0.16 * smoothstep(0.42, 0.85, forest);
 
         let bush_p = if forest > 0.35 {
-            0.10 + 0.34 * smoothstep(0.60, 0.90, self.noise.bush_patch_field(x, z))
+            0.14 + 0.38 * smoothstep(0.60, 0.90, self.noise.bush_patch_field(x, z))
         } else {
-            0.02
+            0.03
         };
 
         let roll = f64::from(trees::hash01(self.seed, gx, gz, 89));
@@ -1554,7 +1561,7 @@ impl TerrainGenerator {
                 // Clump gate: outside meadow patches the cost is one noise
                 // lookup per 4 m².
                 let clump = self.noise.meadow_patch_field(x, z);
-                if clump < 0.22 {
+                if clump < 0.14 {
                     continue;
                 }
 
@@ -1580,8 +1587,10 @@ impl TerrainGenerator {
                 // Probabilities inside a clump, shaped by biome character.
                 let density = column.forest_density;
                 let clearing = 1.0 - smoothstep(0.45, 0.8, density);
-                let tuft_p = (0.22 + 0.60 * clump) * tuft_biome_factor(column.biome);
-                let flower_p = (0.10 + 0.35 * clump) * clearing * flower_biome_factor(column.biome);
+                // Overgrown Hytale ground cover: dense tufts and blooming
+                // meadows inside every clump patch.
+                let tuft_p = (0.32 + 0.68 * clump) * tuft_biome_factor(column.biome);
+                let flower_p = (0.16 + 0.44 * clump) * clearing * flower_biome_factor(column.biome);
                 let fern_p = 0.30 * smoothstep(0.5, 0.8, density) * fern_biome_factor(column.biome);
                 let mushroom_p = 0.12 * smoothstep(0.55, 0.8, density);
 
